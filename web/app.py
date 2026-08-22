@@ -610,20 +610,27 @@ def _render_inventory():
     products = RepositoryFactory.get_product_repository().get_all_products()
 
     with st.expander('Agregar producto'):
-        with st.form('add_product_form', clear_on_submit=True):
-            name = st.text_input('Nombre')
-            description = st.text_area(DESCRIPTION_LABEL, height=68)
+        with st.form('add_product_form', clear_on_submit=True, enter_to_submit=False):
+            name = st.text_input('Nombre *')
+            description = st.text_area(f'{DESCRIPTION_LABEL} *', height=68)
             price = st.number_input('Precio de venta', min_value=0.01, step=1.0, format='%.2f')
             cost = st.number_input('Precio de costo', min_value=0.0, step=1.0, format='%.2f')
             quantity = st.number_input('Cantidad disponible', min_value=0, step=1)
             barcode = st.text_input('Código de barras (opcional)')
             submitted = st.form_submit_button('Guardar producto')
         if submitted:
+            clean_name = name.strip()
+            clean_description = description.strip()
+            if not clean_name or not clean_description:
+                st.error('Completa los campos obligatorios: nombre y descripción.',
+                         icon=':material/error:')
+                return
             try:
-                product = Product(name=name, description=description, price=CUPMoney(f'{price:.2f}'),
-                                 cost=CUPMoney(f'{cost:.2f}'), quantity=int(quantity), barcode=barcode)
+                product = Product(name=clean_name, description=clean_description,
+                                  price=CUPMoney(f'{price:.2f}'), cost=CUPMoney(f'{cost:.2f}'),
+                                  quantity=int(quantity), barcode=barcode.strip())
                 RepositoryFactory.get_product_repository().insert_product(product)
-                st.success(f'Producto "{name}" agregado.')
+                st.success(f'Producto "{clean_name}" agregado.')
                 st.rerun()
             except Exception as error:
                 st.error(str(error))
@@ -641,7 +648,7 @@ def _render_inventory():
         names = [p.name for p in products]
         selected_name = st.selectbox('Selecciona un producto', names, key='inventory_edit_select')
         product = next(p for p in products if p.name == selected_name)
-        with st.form(f'edit_product_form_{product.id}'):
+        with st.form(f'edit_product_form_{product.id}', enter_to_submit=False):
             name = st.text_input('Nombre', value=product.name)
             description = st.text_area(DESCRIPTION_LABEL, value=product.description or '', height=68)
             price = st.number_input('Precio de venta', min_value=0.01, step=1.0, format='%.2f',
@@ -652,10 +659,14 @@ def _render_inventory():
             barcode = st.text_input('Código de barras', value=product.barcode or '')
             save_submitted = st.form_submit_button('Guardar cambios')
         if save_submitted:
+            if not name.strip() or not description.strip():
+                st.error('Completa los campos obligatorios: nombre y descripción.',
+                         icon=':material/error:')
+                return
             try:
-                updated = Product(id=product.id, name=name, description=description,
+                updated = Product(id=product.id, name=name.strip(), description=description.strip(),
                                   price=CUPMoney(f'{price:.2f}'), cost=CUPMoney(f'{cost:.2f}'),
-                                  quantity=int(quantity), barcode=barcode)
+                                  quantity=int(quantity), barcode=barcode.strip())
                 RepositoryFactory.get_product_repository().update_product(updated)
                 st.success('Producto actualizado.')
                 st.rerun()
@@ -751,7 +762,8 @@ def _render_quotes():
     create_tab, history_tab = st.tabs(['Nueva cotización', 'Historial'])
     with create_tab:
         options = ['Artículo libre'] + [p.name for p in products]
-        with st.form('quote_add_item', border=False, clear_on_submit=True):
+        with st.form('quote_add_item', border=False, clear_on_submit=True,
+                     enter_to_submit=False):
             row = st.columns((2, 1, 1), vertical_alignment='bottom')
             source = row[0].selectbox('Artículo', options)
             quantity = row[1].number_input('Cantidad', min_value=1, value=1, step=1)
@@ -790,8 +802,8 @@ def _render_quotes():
                 'Importe': st.column_config.NumberColumn(format='$ %.2f'),
             }, hide_index=True, width='stretch')
             st.metric('Total cotizado', f"${frame['Importe'].sum():,.2f}")
-            with st.form('save_quote_form', clear_on_submit=True):
-                customer = st.text_input('Cliente', placeholder='Público general')
+            with st.form('save_quote_form', clear_on_submit=True, enter_to_submit=False):
+                customer = st.text_input('Cliente *', placeholder='Nombre del cliente')
                 notes = st.text_area('Notas', height=70)
                 save_quote = st.form_submit_button('Guardar cotización', type='primary',
                                                     width='stretch', icon=':material/save:')
@@ -799,7 +811,12 @@ def _render_quotes():
                 st.session_state.quote_items = []
                 st.rerun()
             if save_quote:
-                quote = Quote(customer=customer.strip() or 'Público general', notes=notes.strip())
+                clean_customer = customer.strip()
+                if not clean_customer:
+                    st.error('Escribe el nombre del cliente antes de guardar la cotización.',
+                             icon=':material/error:')
+                    return
+                quote = Quote(customer=clean_customer, notes=notes.strip())
                 quote.items = [QuoteItem(description=item['description'], quantity=item['quantity'],
                                          unit_price=CUPMoney(f"{item['unit_price']:.2f}"))
                                for item in items]
