@@ -1,0 +1,38 @@
+{% extends "base_template.html" %}
+
+{% block title %}
+    Reporte diario
+{% endblock title %}
+
+{% block report_name %}
+    Reporte Diario de Ventas
+{% endblock %}
+
+{% block date_block %}
+    <h2>Fecha: {{ date.day }}-{{ date.month }}-{{ date.year }}</h2>
+{% endblock %}
+
+
+{% block table %}
+    <thead>
+        <th>Id. Venta</th>
+        <th>Producto</th>
+        <th>Id. Producto</th>
+        <th>Pagado (MXN)</th>
+        <th>Costo (MXN)</th>
+        <th>Ganancia (MXN)</th>
+    </thead>
+    <tbody>
+        {% for a_sale in sales %}
+            <tr>
+                <td>{{ a_sale.id }}</td>
+                <td>{{ a_sale.product.name }}</td>
+                <td>{{ a_sale.product_id }}</td>
+                <td>{{ a_sale.price.amount }}</td>
+                <td>{{ a_sale.cost.amount }}</td>
+                <td>{{ a_sale.profit.amount }}</td>
+            </tr>
+        {% endfor %}
+    </tbody>
+{% endblock %}
+

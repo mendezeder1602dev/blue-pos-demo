@@ -1,0 +1,17 @@
+
+{% extends "grouped_sales_template.html" %}
+
+{% block report_name %}
+    <h1>Nombre:</h1>    
+    <p>{{ report_name }}</p>
+{% endblock %}
+
+{% block description_block %}
+    <h1>Descripción:</h1>
+    <p>{{ description }}</p>
+{% endblock %}
+
+{% block date_block %}
+    <h2>Fecha inicial: {{ initial_date.day }}-{{ initial_date.month }}-{{ initial_date.year }}</h2>
+    <h2>Fecha final: {{ final_date.day }}-{{ final_date.month }}-{{ final_date.year }}</h2>
+{% endblock %}

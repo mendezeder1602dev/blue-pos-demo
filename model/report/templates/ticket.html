@@ -1,0 +1,48 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="UTF-8">
+  <style>
+    @page { size: 80mm 240mm; margin: 7mm; }
+    body { font-family: Helvetica, sans-serif; color: #12293D; font-size: 9pt; }
+    h1 { font-size: 15pt; margin: 0 0 3px; text-align: center; }
+    .center { text-align: center; } .muted { color: #52677A; font-size: 8pt; }
+    .line { border-top: 1px solid #C9D5E1; margin: 9px 0; }
+    table { width: 100%; border-collapse: collapse; }
+    th { color: #52677A; font-size: 7.5pt; text-align: left; padding-bottom: 4px; }
+    td { padding: 3px 0; vertical-align: top; } .amount { text-align: right; }
+    .total { font-size: 13pt; font-weight: bold; color: #0D2942; }
+  </style>
+</head>
+<body>
+  <h1>{{ business.business_name or 'Mi negocio' }}</h1>
+  <div class="center muted">
+    {% if business.owner_name %}{{ business.owner_name }}<br>{% endif %}
+    {% if business.address %}{{ business.address }}<br>{% endif %}
+    {% if business.phone %}Tel. {{ business.phone }}{% endif %}
+    {% if business.whatsapp %} · WhatsApp {{ business.whatsapp }}{% endif %}
+    {% if business.email %}<br>{{ business.email }}{% endif %}
+    {% if business.tax_id %}<br>RFC: {{ business.tax_id }}{% endif %}
+  </div>
+  <div class="line"></div>
+  <div class="center"><strong>{{ ticket_title }}</strong><br><span class="muted">Ticket #{{ ticket_number }} · {{ sale_date.strftime('%d/%m/%Y') }}</span></div>
+  <div class="line"></div>
+  <table>
+    <tr><th>ARTÍCULO</th><th class="amount">IMPORTE</th></tr>
+    {% for item in items %}
+    <tr><td>{{ item.quantity }} × {{ item.name }}<br><span class="muted">$ {{ item.unit_price }} MXN c/u</span></td><td class="amount">$ {{ item.line_total }}</td></tr>
+    {% endfor %}
+  </table>
+  <div class="line"></div>
+  {% if payment_method %}
+  <div class="center muted">
+    <strong>Método de pago:</strong> {{ payment_method }}<br>
+    {% if payment_details %}{{ payment_details }}{% endif %}
+  </div>
+  <div class="line"></div>
+  {% endif %}
+  <table><tr><td><strong>TOTAL</strong></td><td class="amount total">$ {{ total }} MXN</td></tr></table>
+  <div class="line"></div>
+  <p class="center muted">Gracias por su compra.<br>Emitido el {{ created_at.strftime('%d/%m/%Y %H:%M') }}</p>
+</body>
+</html>

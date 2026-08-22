@@ -1,0 +1,10 @@
+{% extends "grouped_sales_template.html" %}
+
+{% block report_name %}
+    Reporte Semanal de Ventas
+{% endblock %}
+
+{% block date_block %}
+    <h2>Fecha inicial: {{ initial_date.day }}-{{ initial_date.month }}-{{ initial_date.year }}</h2>
+    <h2>Fecha final: {{ final_date.day }}-{{ final_date.month }}-{{ final_date.year }}</h2>
+{% endblock %}
