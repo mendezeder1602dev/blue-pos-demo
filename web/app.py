@@ -22,6 +22,7 @@ from model.repository.expense import ExpenseFilter
 from model.repository.factory import RepositoryFactory
 from model.repository.product import ProductFilter
 from model.repository.sale import SaleFilter
+from model.report.exports import business_as_dict, generate_excel_bytes, generate_pdf_bytes
 from model.util.monetary_types import CUPMoney
 
 LOW_STOCK_THRESHOLD = 5
@@ -365,7 +366,28 @@ def _get_low_stock_products():
     product_filter = ProductFilter()
     product_filter.less_than_quantity = LOW_STOCK_THRESHOLD
     products = RepositoryFactory.get_product_repository().get_products_by_filter(product_filter)
-    return [product for product in products if not product.is_temporary]
+    return [product for product in products if not product.is_temporary and product.quantity > 0]
+
+
+def _get_out_of_stock_products():
+    return [product for product in RepositoryFactory.get_product_repository().get_all_products()
+            if not product.is_temporary and product.quantity <= 0]
+
+
+def _business_export_data():
+    profile = RepositoryFactory.get_business_profile_repository().get_profile()
+    return business_as_dict(profile)
+
+
+def _inventory_export_rows(products):
+    return [{
+        'Producto': product.name,
+        'Descripción': product.description or '',
+        'Código': product.barcode or '',
+        'Existencia': product.quantity,
+        'Precio de venta': float(product.price.amount),
+        'Costo': float(product.cost.amount),
+    } for product in products]
 
 
 def _render_dashboard():
@@ -382,11 +404,40 @@ def _render_dashboard():
     if _is_administrator():
         st.subheader('Alerta de inventario')
         low_stock = _get_low_stock_products()
-        if not low_stock:
+        out_of_stock = _get_out_of_stock_products()
+        if out_of_stock:
+            st.error(f'{len(out_of_stock)} producto(s) agotado(s). Reabastece el inventario.',
+                     icon=':material/error:')
+            st.table(pd.DataFrame([{'Producto': p.name, 'Unidades': p.quantity}
+                                   for p in out_of_stock]))
+        if low_stock:
+            st.warning('Estos productos están por agotarse, considera reabastecerlos pronto:')
+            st.table(pd.DataFrame([{'Producto': p.name, 'Unidades': p.quantity}
+                                   for p in low_stock]))
+        if not low_stock and not out_of_stock:
             st.success(f'Todos los productos tienen más de {LOW_STOCK_THRESHOLD} unidades disponibles.')
         else:
-            st.warning('Estos productos están por agotarse, considera reabastecerlos pronto:')
-            st.table(pd.DataFrame([{'Producto': p.name, 'Unidades': p.quantity} for p in low_stock]))
+            inventory_sections = [
+                ('Productos por agotarse', _inventory_export_rows(low_stock)),
+                ('Productos agotados', _inventory_export_rows(out_of_stock)),
+            ]
+            business = _business_export_data()
+            alert_columns = st.columns(2)
+            alert_columns[0].download_button(
+                'Alertas en PDF',
+                generate_pdf_bytes(business, 'Alertas de inventario',
+                                   f'Corte al {date.today()}', inventory_sections),
+                f'alertas-inventario-{date.today()}.pdf', 'application/pdf',
+                icon=':material/picture_as_pdf:', width='stretch',
+            )
+            alert_columns[1].download_button(
+                'Alertas en Excel',
+                generate_excel_bytes(business, 'Alertas de inventario',
+                                     f'Corte al {date.today()}', inventory_sections),
+                f'alertas-inventario-{date.today()}.xlsx',
+                'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+                icon=':material/table_view:', width='stretch',
+            )
 
 
 # ---------------------------------------------------------------------------
@@ -434,9 +485,15 @@ def _payment_controls(prefix, total):
             validation_error = 'Captura la referencia o clave de rastreo de la transferencia.'
         details.extend([f'Banco: {bank}', f'Referencia: {transfer_reference}'])
     else:
+        st.metric('Total a pagar', f'${float(total):,.2f}')
+        cash_key = f'{prefix}_cash_received'
+        total_key = f'{prefix}_cash_total'
+        if st.session_state.get(total_key) != float(total):
+            st.session_state[cash_key] = float(total)
+            st.session_state[total_key] = float(total)
         received = st.number_input(
             'Efectivo recibido', min_value=0.0, value=float(total), step=10.0,
-            format='%.2f', key=f'{prefix}_cash_received',
+            format='%.2f', key=cash_key,
         )
         change = max(0.0, float(received) - float(total))
         if float(received) < float(total):
@@ -569,6 +626,7 @@ def _render_sales():
                         return
                     try:
                         sale_repository = RepositoryFactory.get_sale_repository()
+                        transaction_entries = []
                         for product_id, quantity in cart.items():
                             product = product_by_id[product_id]
                             sale = Sale(
@@ -576,7 +634,8 @@ def _render_sales():
                                 date=sale_date, payment_method=payment_method or 'Efectivo',
                                 payment_details=payment_details,
                             )
-                            sale_repository.insert_sales(sale, int(quantity))
+                            transaction_entries.append((sale, int(quantity)))
+                        sale_repository.insert_transaction(transaction_entries)
                         st.session_state.pos_cart = {}
                         st.toast('Venta registrada correctamente.', icon=':material/check_circle:')
                         st.rerun()
@@ -587,17 +646,65 @@ def _render_sales():
             recent_sales = sorted(
                 RepositoryFactory.get_sale_repository().get_all_sales(),
                 key=lambda sale: sale.id, reverse=True,
-            )[:8]
+            )
             if not recent_sales:
                 st.caption('Todavía no hay ventas registradas.')
+            transactions = {}
+            business = _business_export_data()
             for recent_sale in recent_sales:
-                product = product_by_id.get(recent_sale.product_id)
-                name = product.name if product else getattr(recent_sale.product, 'name', f'Producto #{recent_sale.product_id}')
-                row, undo = st.columns((3, 1), vertical_alignment='center')
-                row.markdown(f'**#{recent_sale.id} · {name}**')
-                row.caption(f'{recent_sale.date} · {recent_sale.payment_method or "Sin método"} · {recent_sale.price}')
-                if undo.button('Anular', key=f'undo_sale_{recent_sale.id}'):
-                    RepositoryFactory.get_sale_repository().delete_sale(recent_sale)
+                group_key = recent_sale.transaction_id or f'legacy-{recent_sale.id}'
+                transactions.setdefault(group_key, []).append(recent_sale)
+            for transaction_sales in list(transactions.values())[:8]:
+                first_sale = transaction_sales[0]
+                product_lines = {}
+                for sale in transaction_sales:
+                    product = product_by_id.get(sale.product_id) or sale.product
+                    name = product.name if product else f'Producto #{sale.product_id}'
+                    line = product_lines.setdefault(name, {'quantity': 0, 'total': 0.0})
+                    line['quantity'] += 1
+                    line['total'] += float(sale.price.amount)
+                transaction_total = sum(line['total'] for line in product_lines.values())
+                summary = ' · '.join(
+                    f"{line['quantity']} × {name}" for name, line in product_lines.items()
+                )
+                st.markdown(f'**Venta #{first_sale.id} · ${transaction_total:,.2f}**')
+                st.caption(f'{first_sale.date} · {first_sale.payment_method or "Sin método"} · {summary}')
+                ticket_rows = [{
+                    'Artículo': name, 'Cantidad': line['quantity'],
+                    'Precio unitario': line['total'] / line['quantity'],
+                    'Importe': line['total'],
+                } for name, line in product_lines.items()]
+                ticket_rows.append({
+                    'Artículo': 'TOTAL', 'Cantidad': '', 'Precio unitario': '',
+                    'Importe': transaction_total,
+                })
+                ticket_subtitle = (
+                    f'Fecha: {first_sale.date} · Método: {first_sale.payment_method or "Sin método"}'
+                    f' · {first_sale.payment_details or "Sin referencia"}'
+                )
+                ticket_actions = st.columns(3)
+                ticket_actions[0].download_button(
+                    'Ticket PDF',
+                    generate_pdf_bytes(business, f'Ticket de venta #{first_sale.id}',
+                                       ticket_subtitle, [('Productos', ticket_rows)]),
+                    f'ticket-venta-{first_sale.id}.pdf', 'application/pdf',
+                    key=f'ticket_pdf_{first_sale.id}', icon=':material/picture_as_pdf:',
+                    width='stretch',
+                )
+                ticket_actions[1].download_button(
+                    'Ticket Excel',
+                    generate_excel_bytes(business, f'Ticket de venta #{first_sale.id}',
+                                         ticket_subtitle, [('Productos', ticket_rows)]),
+                    f'ticket-venta-{first_sale.id}.xlsx',
+                    'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+                    key=f'ticket_excel_{first_sale.id}', icon=':material/table_view:',
+                    width='stretch',
+                )
+                if ticket_actions[2].button('Anular', key=f'undo_sale_{first_sale.id}',
+                                            width='stretch'):
+                    RepositoryFactory.get_sale_repository().delete_sales(
+                        [sale.id for sale in transaction_sales]
+                    )
                     st.rerun()
 
 
@@ -755,41 +862,67 @@ def _render_express_sale():
 
 
 def _render_quotes():
-    _hero('Cotizaciones', 'Prepara propuestas sin descontar existencias ni registrar una venta.',
+    _hero('Cotizaciones', 'Prepara propuestas con información actual del inventario y envíalas a caja.',
           'VENDEDOR · PROPUESTAS')
     st.session_state.setdefault('quote_items', [])
-    products = RepositoryFactory.get_product_repository().get_all_products()
+    products = [product for product in RepositoryFactory.get_product_repository().get_all_products()
+                if not product.is_temporary]
+    product_by_id = {product.id: product for product in products}
     create_tab, history_tab = st.tabs(['Nueva cotización', 'Historial'])
+
     with create_tab:
-        options = ['Artículo libre'] + [p.name for p in products]
-        with st.form('quote_add_item', border=False, clear_on_submit=True,
-                     enter_to_submit=False):
+        options = ['Artículo libre'] + [product.name for product in products]
+        source = st.selectbox('Producto del inventario', options, key='quote_product_source')
+        selected = next((product for product in products if product.name == source), None)
+        if selected:
+            information = st.columns(4)
+            information[0].metric('Precio de venta', f'${float(selected.price.amount):,.2f}')
+            information[1].metric('Existencia', f'{selected.quantity} unidades')
+            information[2].metric('Costo', f'${float(selected.cost.amount):,.2f}')
+            information[3].metric('Código', selected.barcode or 'Sin código')
+            st.info(selected.description or 'Este producto no tiene descripción.',
+                    icon=':material/inventory_2:')
+        else:
+            st.caption('El artículo libre no está vinculado al inventario y no puede enviarse a caja.')
+
+        form_key = f"quote_add_item_{selected.id if selected else 'free'}"
+        with st.form(form_key, border=False, clear_on_submit=True, enter_to_submit=False):
             row = st.columns((2, 1, 1), vertical_alignment='bottom')
-            source = row[0].selectbox('Artículo', options)
+            custom_name = row[0].text_input(
+                'Descripción *', value=selected.description or selected.name if selected else '',
+                disabled=selected is not None, placeholder='Producto o servicio',
+            )
             quantity = row[1].number_input('Cantidad', min_value=1, value=1, step=1)
-            selected = next((p for p in products if p.name == source), None)
-            price = row[2].number_input('Precio unitario', min_value=0.01,
-                                        value=float(selected.price.amount) if selected else 1.0,
-                                        step=1.0, format='%.2f')
-            custom_name = st.text_input('Descripción del artículo',
-                                        disabled=source != 'Artículo libre',
-                                        placeholder='Producto o servicio')
-            add_item = st.form_submit_button('Agregar', icon=':material/add:')
+            price = row[2].number_input(
+                'Precio unitario', min_value=0.01,
+                value=float(selected.price.amount) if selected else 1.0,
+                step=1.0, format='%.2f',
+            )
+            add_item = st.form_submit_button('Agregar a la cotización', icon=':material/add:')
+
         if add_item:
-            description = custom_name.strip() if source == 'Artículo libre' else source
-            if description:
+            description = (selected.name if selected else custom_name.strip())
+            if not description:
+                st.error('Escribe una descripción para el artículo.', icon=':material/error:')
+            elif selected and int(quantity) > selected.quantity:
+                st.error(f'Solo hay {selected.quantity} unidades disponibles de {selected.name}.',
+                         icon=':material/error:')
+            else:
+                product_id = selected.id if selected else None
                 matching_item = next((item for item in st.session_state.quote_items
-                                      if item['description'] == description
+                                      if item.get('product_id') == product_id
+                                      and item['description'] == description
                                       and item['unit_price'] == float(price)), None)
                 if matching_item:
                     matching_item['quantity'] += int(quantity)
                 else:
                     st.session_state.quote_items.append({
-                        'description': description, 'quantity': int(quantity),
-                        'unit_price': float(price)})
+                        'draft_id': datetime.now().strftime('%Y%m%d%H%M%S%f'),
+                        'product_id': product_id, 'description': description,
+                        'quantity': int(quantity), 'unit_price': float(price),
+                    })
                 st.rerun()
-            else:
-                st.error('Escribe una descripción para el artículo.')
+
         items = st.session_state.quote_items
         if items:
             frame = pd.DataFrame([{
@@ -802,11 +935,39 @@ def _render_quotes():
                 'Importe': st.column_config.NumberColumn(format='$ %.2f'),
             }, hide_index=True, width='stretch')
             st.metric('Total cotizado', f"${frame['Importe'].sum():,.2f}")
+
+            st.markdown('#### Editar artículos')
+            for index, item in enumerate(list(items)):
+                draft_id = item.setdefault('draft_id', f'legacy_{index}')
+                with st.container(border=True):
+                    edit_columns = st.columns((2.2, .8, 1, .55, .55), vertical_alignment='bottom')
+                    edited_description = edit_columns[0].text_input(
+                        'Descripción', value=item['description'], key=f'quote_desc_{draft_id}')
+                    edited_quantity = edit_columns[1].number_input(
+                        'Cantidad', min_value=1, value=int(item['quantity']), step=1,
+                        key=f'quote_qty_{draft_id}')
+                    edited_price = edit_columns[2].number_input(
+                        'Precio', min_value=0.01, value=float(item['unit_price']), step=1.0,
+                        format='%.2f', key=f'quote_price_{draft_id}')
+                    if edit_columns[3].button('', icon=':material/save:',
+                                              key=f'quote_update_{draft_id}', help='Actualizar'):
+                        if not edited_description.strip():
+                            st.error('La descripción no puede quedar vacía.', icon=':material/error:')
+                        else:
+                            item['description'] = edited_description.strip()
+                            item['quantity'] = int(edited_quantity)
+                            item['unit_price'] = float(edited_price)
+                            st.rerun()
+                    if edit_columns[4].button('', icon=':material/delete:',
+                                              key=f'quote_remove_{draft_id}', help='Eliminar'):
+                        st.session_state.quote_items.pop(index)
+                        st.rerun()
+
             with st.form('save_quote_form', clear_on_submit=True, enter_to_submit=False):
                 customer = st.text_input('Cliente *', placeholder='Nombre del cliente')
                 notes = st.text_area('Notas', height=70)
-                save_quote = st.form_submit_button('Guardar cotización', type='primary',
-                                                    width='stretch', icon=':material/save:')
+                save_quote = st.form_submit_button(
+                    'Guardar cotización', type='primary', width='stretch', icon=':material/save:')
             if st.button('Vaciar borrador', icon=':material/delete_sweep:'):
                 st.session_state.quote_items = []
                 st.rerun()
@@ -817,9 +978,10 @@ def _render_quotes():
                              icon=':material/error:')
                     return
                 quote = Quote(customer=clean_customer, notes=notes.strip())
-                quote.items = [QuoteItem(description=item['description'], quantity=item['quantity'],
-                                         unit_price=CUPMoney(f"{item['unit_price']:.2f}"))
-                               for item in items]
+                quote.items = [QuoteItem(
+                    product_id=item.get('product_id'), description=item['description'],
+                    quantity=item['quantity'], unit_price=CUPMoney(f"{item['unit_price']:.2f}"))
+                    for item in items]
                 try:
                     RepositoryFactory.get_quote_repository().insert_quote(quote)
                     st.session_state.quote_items = []
@@ -829,8 +991,10 @@ def _render_quotes():
                     st.error(f'No se pudo guardar: {error}')
         else:
             st.caption('Agrega artículos para comenzar la cotización.')
+
     with history_tab:
         quotes = RepositoryFactory.get_quote_repository().get_all_quotes()
+        business = _business_export_data()
         if not quotes:
             st.info('Todavía no hay cotizaciones guardadas.', icon=':material/request_quote:')
         for quote in quotes:
@@ -843,17 +1007,79 @@ def _render_quotes():
                     'Precio': float(item.unit_price.amount),
                     'Importe': float(item.unit_price.amount) * item.quantity,
                 } for item in quote.items]), hide_index=True, width='stretch')
-                actions = st.columns(3)
-                if actions[0].button('Aceptada', key=f'accept_quote_{quote.id}'):
-                    RepositoryFactory.get_quote_repository().update_status(quote.id, 'Aceptada')
-                    st.rerun()
-                if actions[1].button('Vencida', key=f'expire_quote_{quote.id}'):
+
+                quote_rows = [{
+                    'Artículo': item.description,
+                    'Cantidad': item.quantity,
+                    'Precio unitario': float(item.unit_price.amount),
+                    'Importe': float(item.unit_price.amount) * item.quantity,
+                } for item in quote.items]
+                quote_rows.append({
+                    'Artículo': 'TOTAL', 'Cantidad': '', 'Precio unitario': '',
+                    'Importe': total,
+                })
+                quote_title = f'Cotización #{quote.id} · {quote.customer}'
+                quote_subtitle = f'Fecha: {quote.date} · Estado: {quote.status} · {quote.notes or "Sin notas"}'
+                export_columns = st.columns(2)
+                export_columns[0].download_button(
+                    'Descargar PDF',
+                    generate_pdf_bytes(business, quote_title, quote_subtitle,
+                                       [('Productos cotizados', quote_rows)]),
+                    f'cotizacion-{quote.id}.pdf', 'application/pdf',
+                    key=f'quote_pdf_{quote.id}', icon=':material/picture_as_pdf:',
+                    width='stretch',
+                )
+                export_columns[1].download_button(
+                    'Descargar Excel',
+                    generate_excel_bytes(business, quote_title, quote_subtitle,
+                                         [('Productos cotizados', quote_rows)]),
+                    f'cotizacion-{quote.id}.xlsx',
+                    'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+                    key=f'quote_excel_{quote.id}', icon=':material/table_view:',
+                    width='stretch',
+                )
+
+                if quote.status == 'Pendiente' and st.button(
+                        'Aceptar y enviar al carrito', type='primary',
+                        key=f'accept_quote_{quote.id}', icon=':material/shopping_cart_checkout:'):
+                    required = {}
+                    free_items = []
+                    for item in quote.items:
+                        if item.product_id is None:
+                            free_items.append(item.description)
+                        else:
+                            required[item.product_id] = required.get(item.product_id, 0) + item.quantity
+                    unavailable = []
+                    current_cart = st.session_state.setdefault('pos_cart', {})
+                    for product_id, required_quantity in required.items():
+                        product = product_by_id.get(product_id)
+                        final_quantity = current_cart.get(product_id, 0) + required_quantity
+                        if product is None:
+                            unavailable.append(f'Producto #{product_id} ya no existe')
+                        elif final_quantity > product.quantity:
+                            unavailable.append(
+                                f'{product.name}: se requieren {final_quantity} y hay {product.quantity}')
+                    if free_items:
+                        st.error('Primero agrega al inventario estos artículos libres: '
+                                 + ', '.join(free_items), icon=':material/error:')
+                    elif unavailable:
+                        st.error('No se puede enviar a caja por falta de existencias: '
+                                 + '; '.join(unavailable), icon=':material/error:')
+                    else:
+                        for product_id, required_quantity in required.items():
+                            current_cart[product_id] = current_cart.get(product_id, 0) + required_quantity
+                        RepositoryFactory.get_quote_repository().update_status(quote.id, 'Aceptada')
+                        st.session_state['page'] = 'Canal de venta'
+                        st.rerun()
+
+                secondary_actions = st.columns(2)
+                if quote.status == 'Pendiente' and secondary_actions[0].button(
+                        'Marcar vencida', key=f'expire_quote_{quote.id}'):
                     RepositoryFactory.get_quote_repository().update_status(quote.id, 'Vencida')
                     st.rerun()
-                if actions[2].button('Eliminar', key=f'delete_quote_{quote.id}'):
+                if secondary_actions[1].button('Eliminar cotización', key=f'delete_quote_{quote.id}'):
                     RepositoryFactory.get_quote_repository().delete_quote(quote.id)
                     st.rerun()
-
 
 # ---------------------------------------------------------------------------
 # Gastos
@@ -965,21 +1191,70 @@ def _render_reports():
     columns[4].metric(NET_PROFIT_LABEL, f"{result['net_profit'].amount:,.2f} MXN")
 
     sales_df = pd.DataFrame([{
-        'ID': s.id, 'Producto': s.product.name if s.product else '—', 'Fecha': str(s.date), 'Precio': str(s.price),
+        'Folio': s.transaction_id or str(s.id), 'ID': s.id,
+        'Producto': s.product.name if s.product else '—', 'Fecha': str(s.date),
+        'Precio': float(s.price.amount), 'Método': s.payment_method or '',
     } for s in result['sales']])
     expenses_df = pd.DataFrame([{
-        'ID': e.id, 'Nombre': e.name, 'Fecha': str(e.date), 'Gastado': str(e.spent_money),
+        'ID': e.id, 'Nombre': e.name, 'Fecha': str(e.date),
+        'Gastado': float(e.spent_money.amount),
     } for e in result['expenses']])
+    low_stock = _get_low_stock_products()
+    out_of_stock = _get_out_of_stock_products()
+    low_stock_df = pd.DataFrame(_inventory_export_rows(low_stock))
+    out_of_stock_df = pd.DataFrame(_inventory_export_rows(out_of_stock))
 
-    tab_sales, tab_expenses = st.tabs(['Ventas del periodo', 'Gastos del periodo'])
+    summary_rows = [{
+        'Periodo': f'{initial_date} al {final_date}',
+        'Ventas': result['sale_quantity'],
+        'Ingresos': float(result['acquired_money'].amount),
+        'Ganancia bruta': float(result['total_profit'].amount),
+        'Gastos': float(result['total_expense'].amount),
+        'Ganancia neta': float(result['net_profit'].amount),
+    }]
+    report_sections = [
+        ('Resumen', summary_rows),
+        ('Ventas', sales_df.to_dict('records')),
+        ('Gastos', expenses_df.to_dict('records')),
+        ('Productos por agotarse', low_stock_df.to_dict('records')),
+        ('Productos agotados', out_of_stock_df.to_dict('records')),
+    ]
+    business = _business_export_data()
+    report_title = 'Reporte general de operación'
+    report_subtitle = f'Periodo del {initial_date} al {final_date}'
+    export_columns = st.columns(2)
+    export_columns[0].download_button(
+        'Descargar reporte PDF',
+        generate_pdf_bytes(business, report_title, report_subtitle, report_sections),
+        f'reporte-{initial_date}-{final_date}.pdf', 'application/pdf',
+        icon=':material/picture_as_pdf:', width='stretch',
+    )
+    export_columns[1].download_button(
+        'Descargar reporte Excel',
+        generate_excel_bytes(business, report_title, report_subtitle, report_sections),
+        f'reporte-{initial_date}-{final_date}.xlsx',
+        'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+        icon=':material/table_view:', width='stretch',
+    )
+
+    tab_sales, tab_expenses, tab_low, tab_out = st.tabs([
+        'Ventas del periodo', 'Gastos del periodo', 'Por agotarse', 'Agotados'])
     with tab_sales:
         st.dataframe(sales_df, width='stretch', hide_index=True)
-        if not sales_df.empty:
-            st.download_button('Descargar ventas (CSV)', sales_df.to_csv(index=False), 'ventas.csv')
     with tab_expenses:
         st.dataframe(expenses_df, width='stretch', hide_index=True)
-        if not expenses_df.empty:
-            st.download_button('Descargar gastos (CSV)', expenses_df.to_csv(index=False), 'gastos.csv')
+    with tab_low:
+        if low_stock_df.empty:
+            st.success('No hay productos por agotarse.')
+        else:
+            st.warning(f'{len(low_stock_df)} producto(s) requieren reabastecimiento.')
+            st.dataframe(low_stock_df, width='stretch', hide_index=True)
+    with tab_out:
+        if out_of_stock_df.empty:
+            st.success('No hay productos agotados.')
+        else:
+            st.error(f'{len(out_of_stock_df)} producto(s) están agotados.')
+            st.dataframe(out_of_stock_df, width='stretch', hide_index=True)
 
 
 # ---------------------------------------------------------------------------
@@ -1020,11 +1295,14 @@ def _render_business_profile():
         whatsapp = st.text_input('WhatsApp', value=profile.whatsapp or '')
         email = st.text_input('Correo', value=profile.email or '')
         address = st.text_input('Dirección', value=profile.address or '')
+        tax_id = st.text_input('RFC o identificación fiscal', value=profile.tax_id or '')
+        website = st.text_input('Sitio web', value=profile.website or '')
         submitted = st.form_submit_button('Guardar perfil')
     if submitted:
         repository.save_profile({
             'business_name': business_name, 'owner_name': owner_name, 'phone': phone,
             'whatsapp': whatsapp, 'email': email, 'address': address,
+            'tax_id': tax_id, 'website': website,
         })
         st.success('Perfil actualizado.')
 

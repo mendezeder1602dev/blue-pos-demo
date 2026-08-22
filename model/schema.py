@@ -21,10 +21,14 @@ def create_database(database_url=DB_URL):
         for field in ('email', 'tax_id', 'website', 'logo_path'):
             if field not in profile_columns:
                 connection.execute(text(f"ALTER TABLE business_profile ADD COLUMN {field} VARCHAR(500) DEFAULT ''"))
+        quote_item_columns = {row[1] for row in connection.execute(text('PRAGMA table_info(quote_items)'))}
+        if 'product_id' not in quote_item_columns:
+            connection.execute(text("ALTER TABLE quote_items ADD COLUMN product_id INTEGER"))
         sales_columns = {row[1] for row in connection.execute(text('PRAGMA table_info(sales)'))}
         for field, column_type in {
             'payment_method': 'VARCHAR(50)',
             'payment_details': 'VARCHAR(250)',
+            'transaction_id': 'VARCHAR(36)',
         }.items():
             if field not in sales_columns:
                 connection.execute(text(f"ALTER TABLE sales ADD COLUMN {field} {column_type} DEFAULT ''"))

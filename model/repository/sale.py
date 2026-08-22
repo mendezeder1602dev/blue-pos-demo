@@ -1,4 +1,5 @@
 from datetime import date
+from uuid import uuid4
 
 from sqlalchemy import update, select, delete, cast, Numeric, asc, desc, Float, func
 
@@ -97,6 +98,29 @@ class SaleRepository(RepositoryObserver):
         self._notify_on_data_changed_listeners()
         return sales
 
+    def insert_transaction(self, entries: list) -> list:
+        """Registra todos los renglones de un cobro como una operación atómica."""
+        if not entries:
+            raise ValueError('A transaction must contain at least one product.')
+        transaction_id = uuid4().hex
+        for sale, quantity in entries:
+            self.__check_quantity_is_positive(quantity)
+            self.__check_price_is_positive(sale)
+            self.__check_cost_is_not_negative(sale)
+            self.__check_product_exists(sale)
+            self.__check_there_are_enough_products(sale, quantity)
+        inserted_sales = []
+        try:
+            for sale, quantity in entries:
+                sale.transaction_id = transaction_id
+                inserted_sales.extend(self.__execute_insertion_and_return_sales(sale, quantity))
+                self.__execute_product_quantity_update(sale, quantity)
+            self.__session.commit()
+        except Exception:
+            self.__session.rollback()
+            raise
+        self._notify_on_data_changed_listeners()
+        return inserted_sales
     def __check_quantity_is_positive(self, quantity: int):
         if quantity <= 0:
             raise ValueError('The quantity of sales must be positive.')
@@ -134,7 +158,8 @@ class SaleRepository(RepositoryObserver):
                 price=sale.price,
                 cost=sale.cost,
                 payment_method=getattr(sale, 'payment_method', 'cash'),
-                payment_details=getattr(sale, 'payment_details', '')
+                payment_details=getattr(sale, 'payment_details', ''),
+                transaction_id=getattr(sale, 'transaction_id', None),
             )
             sales.append(a_sale)
         self.__session.add_all(sales)

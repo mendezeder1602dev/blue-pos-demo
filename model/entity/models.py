@@ -69,6 +69,7 @@ class Sale(Base):
     cost = Column(MoneyColumn(), nullable=False, default=CUPMoney('1.00'))
     payment_method = Column(String(length=50), nullable=False, default='cash')
     payment_details = Column(String(length=250), nullable=True, default='')
+    transaction_id = Column(String(length=36), nullable=True, index=True)
     product = relationship('Product', backref=backref('sales', cascade='all,delete'))
 
     @property
@@ -96,6 +97,7 @@ class QuoteItem(Base):
     __tablename__ = 'quote_items'
     id = Column(Integer, primary_key=True)
     quote_id = Column(Integer, ForeignKey('quotes.id', ondelete='CASCADE'), nullable=False)
+    product_id = Column(Integer, ForeignKey('products.id', ondelete='SET NULL'), nullable=True)
     description = Column(String(length=120), nullable=False)
     quantity = Column(Integer, nullable=False, default=1)
     unit_price = Column(MoneyColumn(), nullable=False, default=CUPMoney('1.00'))
