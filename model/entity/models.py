@@ -2,10 +2,10 @@ from sqlalchemy.orm import declarative_base, relationship, backref
 from sqlalchemy import Column, ForeignKey
 from sqlalchemy import Integer, Boolean
 from sqlalchemy import String
-from sqlalchemy import Date
+from sqlalchemy import Date, DateTime
 from model.util.money_colum import MoneyColumn
 from model.util.monetary_types import CUPMoney
-from datetime import date
+from datetime import date, datetime
 
 Base = declarative_base()
 
@@ -151,3 +151,12 @@ class User(Base):
     # se guardan en la base indicada por esta clave, nunca mezclados aquí.
     workspace_key = Column(String(length=180), nullable=True, default='primary')
     credential_version = Column(Integer, nullable=False, default=0)
+
+class AuthSession(Base):
+    """Sesión web revocable; nunca almacena contraseñas ni el token original."""
+    __tablename__ = 'auth_sessions'
+    id = Column(Integer, primary_key=True)
+    token_hash = Column(String(length=64), nullable=False, unique=True, index=True)
+    user_id = Column(Integer, ForeignKey('users.id', ondelete='CASCADE'), nullable=False)
+    expires_at = Column(DateTime, nullable=False, default=datetime.utcnow)
+    user = relationship('User')

@@ -333,15 +333,23 @@ def _render_login():
                     unsafe_allow_html=True)
 
 
-def _log_in(user):
+def _log_in(user, persist=True):
     schema.activate_user_workspace(user)
     st.session_state['user'] = user
     st.session_state['page'] = 'Tablero'
+    if persist and getattr(user, 'id', None) is not None:
+        token = RepositoryFactory.get_user_repository().create_session(user)
+        st.query_params['session'] = token
     st.rerun()
 
 
 def _log_out():
+    token = st.query_params.get('session')
+    if token:
+        RepositoryFactory.get_user_repository().revoke_session(token)
+        del st.query_params['session']
     st.session_state.pop('user', None)
+    st.session_state.pop('page', None)
     st.rerun()
 
 
@@ -489,8 +497,12 @@ def _render_sales():
                     barcode = f' · Código {product.barcode}' if product.barcode else ''
                     st.caption(f'{product.quantity} disponibles{barcode}')
                     st.markdown(f'### ${float(product.price.amount):,.2f}')
+                    in_cart = st.session_state.pos_cart.get(product.id, 0)
+                    if in_cart:
+                        st.caption(f'En la venta actual: {in_cart} unidades')
+                    button_label = f'Agregar otra · {in_cart} en venta' if in_cart else 'Agregar a la venta'
                     if st.button(
-                        'Agregar al carrito', key=f'add_cart_{product.id}',
+                        button_label, key=f'add_cart_{product.id}',
                         icon=':material/add_shopping_cart:', width='stretch',
                     ):
                         current = st.session_state.pos_cart.get(product.id, 0)
@@ -515,7 +527,7 @@ def _render_sales():
                     product = product_by_id[product_id]
                     line_total = float(product.price.amount) * current_quantity
                     total += line_total
-                    st.markdown(f'**{product.name}**')
+                    st.markdown(f'**{product.name}** — **{current_quantity} unidades**')
                     quantity_column, line_column, remove_column = st.columns(
                         (1.15, 1.25, .45), vertical_alignment='center'
                     )
@@ -598,7 +610,7 @@ def _render_inventory():
     products = RepositoryFactory.get_product_repository().get_all_products()
 
     with st.expander('Agregar producto'):
-        with st.form('add_product_form'):
+        with st.form('add_product_form', clear_on_submit=True):
             name = st.text_input('Nombre')
             description = st.text_area(DESCRIPTION_LABEL, height=68)
             price = st.number_input('Precio de venta', min_value=0.01, step=1.0, format='%.2f')
@@ -739,7 +751,7 @@ def _render_quotes():
     create_tab, history_tab = st.tabs(['Nueva cotización', 'Historial'])
     with create_tab:
         options = ['Artículo libre'] + [p.name for p in products]
-        with st.form('quote_add_item', border=False):
+        with st.form('quote_add_item', border=False, clear_on_submit=True):
             row = st.columns((2, 1, 1), vertical_alignment='bottom')
             source = row[0].selectbox('Artículo', options)
             quantity = row[1].number_input('Cantidad', min_value=1, value=1, step=1)
@@ -754,8 +766,15 @@ def _render_quotes():
         if add_item:
             description = custom_name.strip() if source == 'Artículo libre' else source
             if description:
-                st.session_state.quote_items.append({
-                    'description': description, 'quantity': int(quantity), 'unit_price': float(price)})
+                matching_item = next((item for item in st.session_state.quote_items
+                                      if item['description'] == description
+                                      and item['unit_price'] == float(price)), None)
+                if matching_item:
+                    matching_item['quantity'] += int(quantity)
+                else:
+                    st.session_state.quote_items.append({
+                        'description': description, 'quantity': int(quantity),
+                        'unit_price': float(price)})
                 st.rerun()
             else:
                 st.error('Escribe una descripción para el artículo.')
@@ -771,7 +790,7 @@ def _render_quotes():
                 'Importe': st.column_config.NumberColumn(format='$ %.2f'),
             }, hide_index=True, width='stretch')
             st.metric('Total cotizado', f"${frame['Importe'].sum():,.2f}")
-            with st.form('save_quote_form'):
+            with st.form('save_quote_form', clear_on_submit=True):
                 customer = st.text_input('Cliente', placeholder='Público general')
                 notes = st.text_area('Notas', height=70)
                 save_quote = st.form_submit_button('Guardar cotización', type='primary',
@@ -1030,6 +1049,16 @@ def _render_app():
 
 
 def main():
+    _bootstrap_auth()
+    if 'user' not in st.session_state:
+        token = st.query_params.get('session')
+        user = RepositoryFactory.get_user_repository().authenticate_session(token)
+        if user is not None:
+            schema.activate_user_workspace(user)
+            st.session_state['user'] = user
+            st.session_state['page'] = 'Tablero'
+        elif token:
+            del st.query_params['session']
     if 'user' not in st.session_state:
         _render_login()
     else:

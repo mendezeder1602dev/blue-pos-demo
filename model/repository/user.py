@@ -1,8 +1,9 @@
 import hashlib
 import os
 import secrets
+from datetime import datetime, timedelta
 from sqlalchemy import select
-from model.entity.models import User
+from model.entity.models import AuthSession, User
 
 
 class UserRepository:
@@ -53,6 +54,40 @@ class UserRepository:
     def authenticate(self, username, password):
         user = self.__session.scalars(select(User).where(User.username == username)).first()
         return user if user and self._verify(password, user.password_hash) else None
+    def create_session(self, user, duration_days=7):
+        token = secrets.token_urlsafe(32)
+        session = AuthSession(
+            token_hash=hashlib.sha256(token.encode()).hexdigest(),
+            user_id=user.id,
+            expires_at=datetime.utcnow() + timedelta(days=duration_days),
+        )
+        self.__session.add(session)
+        self.__session.commit()
+        return token
+    def authenticate_session(self, token):
+        if not token:
+            return None
+        token_hash = hashlib.sha256(token.encode()).hexdigest()
+        session = self.__session.scalars(
+            select(AuthSession).where(AuthSession.token_hash == token_hash)
+        ).first()
+        if session is None:
+            return None
+        if session.expires_at <= datetime.utcnow():
+            self.__session.delete(session)
+            self.__session.commit()
+            return None
+        return session.user
+    def revoke_session(self, token):
+        if not token:
+            return
+        token_hash = hashlib.sha256(token.encode()).hexdigest()
+        session = self.__session.scalars(
+            select(AuthSession).where(AuthSession.token_hash == token_hash)
+        ).first()
+        if session is not None:
+            self.__session.delete(session)
+            self.__session.commit()
     def reset_password(self, username, recovery_code, password):
         user = self.__session.scalars(select(User).where(User.username == username)).first()
         if not user or not self._verify(recovery_code, user.recovery_hash): raise ValueError('Datos de recuperación incorrectos.')

@@ -1,7 +1,7 @@
 """Creación y migración de esquema, compartida entre la app de escritorio y la web."""
 from sqlalchemy import create_engine, text
 
-from model.entity.models import Base, User
+from model.entity.models import AuthSession, Base, User
 from model.repository.factory import DB_URL, RepositoryFactory
 
 
@@ -35,6 +35,7 @@ def create_auth_database():
     repository = RepositoryFactory.get_user_repository()
     engine = repository._UserRepository__session.bind
     User.__table__.create(engine, checkfirst=True)
+    AuthSession.__table__.create(engine, checkfirst=True)
     with engine.begin() as connection:
         columns = {row[1] for row in connection.execute(text('PRAGMA table_info(users)'))}
         if 'workspace_key' not in columns:
