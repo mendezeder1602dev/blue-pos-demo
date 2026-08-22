@@ -1052,13 +1052,15 @@ def main():
     _bootstrap_auth()
     if 'user' not in st.session_state:
         token = st.query_params.get('session')
-        user = RepositoryFactory.get_user_repository().authenticate_session(token)
-        if user is not None:
-            schema.activate_user_workspace(user)
-            st.session_state['user'] = user
-            st.session_state['page'] = 'Tablero'
-        elif token:
-            del st.query_params['session']
+        if token:
+            user_repository = RepositoryFactory.get_user_repository()
+            user = user_repository.authenticate_session(token)
+            if user is not None:
+                schema.activate_user_workspace(user)
+                st.session_state['user'] = user
+                st.session_state['page'] = 'Tablero'
+            else:
+                del st.query_params['session']
     if 'user' not in st.session_state:
         _render_login()
     else:
