@@ -86,8 +86,8 @@ negocio a lo largo del tiempo.
 # Contribuir
 
 Si deseas contribuir al proyecto puedes dar sugerencias y avisar de errores escribiendo a
-**<a href="mailto:blueposapp@gmail.com">blueposapp@gmail.com</a>**,
-o realizando **donaciones** al número de teléfono **+53 55023808**. También puedes correr la voz sobre este proyecto en
+**<a href="mendezeder1602@gmail.com">  GRUPO ECCOS</a>**,
+o realizando **donaciones** al número de teléfono **+52 9371541975**. También puedes correr la voz sobre este proyecto en
 tus redes sociales, para que más personas se beneficien.
 
 ## Si eres desarrollador
