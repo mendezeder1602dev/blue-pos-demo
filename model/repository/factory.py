@@ -11,6 +11,8 @@ from model.repository.sales_grouped_by_product import SalesGroupedByProductRepos
 from model.repository.business_profile import BusinessProfileRepository
 from model.repository.user import UserRepository
 from model.repository.quote import QuoteRepository
+from model.repository.cash_close import CashCloseRepository
+from model.repository.cash_control import CashControlRepository
 
 
 __BLUE_POS_FOLDER_PATH = Path(os.path.join(str(Path.home()), '.blue-pos/'))
@@ -40,6 +42,8 @@ class RepositoryFactory:
     __auth_session = None
     __auth_user_repository = None
     __quote_repository = None
+    __cash_close_repository = None
+    __cash_control_repository = None
 
     @staticmethod
     def activate_workspace(url: str):
@@ -63,6 +67,8 @@ class RepositoryFactory:
         RepositoryFactory.__economic_summary_repository = None
         RepositoryFactory.__business_profile_repository = None
         RepositoryFactory.__quote_repository = None
+        RepositoryFactory.__cash_close_repository = None
+        RepositoryFactory.__cash_control_repository = None
 
     @staticmethod
     def workspace_url(workspace_key: str) -> str:
@@ -145,6 +151,20 @@ class RepositoryFactory:
         return RepositoryFactory.__quote_repository
 
     @staticmethod
+    def get_cash_close_repository(url: str = None):
+        RepositoryFactory.__create_session_if_necessary(url)
+        if RepositoryFactory.__cash_close_repository is None:
+            RepositoryFactory.__cash_close_repository = CashCloseRepository(RepositoryFactory.__session)
+        return RepositoryFactory.__cash_close_repository
+
+    @staticmethod
+    def get_cash_control_repository(url: str = None):
+        RepositoryFactory.__create_session_if_necessary(url)
+        if RepositoryFactory.__cash_control_repository is None:
+            RepositoryFactory.__cash_control_repository = CashControlRepository(RepositoryFactory.__session)
+        return RepositoryFactory.__cash_control_repository
+
+    @staticmethod
     def get_user_repository():
         """Repositorio de credenciales separado de las ventas e inventario."""
         if RepositoryFactory.__auth_session is None:
@@ -184,6 +204,8 @@ class RepositoryFactory:
         RepositoryFactory.__economic_summary_repository = None
         RepositoryFactory.__business_profile_repository = None
         RepositoryFactory.__quote_repository = None
+        RepositoryFactory.__cash_close_repository = None
+        RepositoryFactory.__cash_control_repository = None
         RepositoryFactory.__auth_session = None
         RepositoryFactory.__auth_engine = None
         RepositoryFactory.__auth_user_repository = None

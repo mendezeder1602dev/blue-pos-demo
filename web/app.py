@@ -9,6 +9,7 @@ import calendar
 import os
 import sys
 from datetime import date, datetime, timedelta
+from html import escape
 from types import SimpleNamespace
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -17,7 +18,7 @@ import pandas as pd
 import streamlit as st
 
 from model import economy, schema
-from model.entity.models import Expense, Product, Quote, QuoteItem, Sale
+from model.entity.models import CashClose, CashMovement, CashOpening, Expense, Product, Quote, QuoteItem, Sale
 from model.repository.expense import ExpenseFilter
 from model.repository.factory import RepositoryFactory
 from model.repository.product import ProductFilter
@@ -131,6 +132,45 @@ def _apply_brand_theme():
     .st-key-pos_workspace [data-testid="stVerticalBlock"] { gap:.65rem; }
     .st-key-pos_workspace [data-testid="stWidgetLabel"] p { font-size:.86rem; }
     .st-key-pos_workspace [data-testid="stNumberInput"] input { min-width:0; }
+    .st-key-product_grid {
+        background:#E9EDF2; border:1px solid #D8DEE7; border-radius:12px;
+        padding:10px; scrollbar-color:#73859A #E1E6EC; scrollbar-width:thin;
+    }
+    [class*="st-key-product_card_"] > div > [data-testid="stVerticalBlock"] {
+        min-height:188px; padding:13px !important; gap:.38rem !important;
+        background:linear-gradient(180deg,#FFFFFF 0%,#F8FAFC 100%);
+        border:1px solid #D7DEE7; border-radius:11px;
+        box-shadow:0 3px 9px rgba(20,35,55,.06);
+    }
+    [class*="st-key-product_card_"]:hover > div > [data-testid="stVerticalBlock"] {
+        border-color:#7895B4; box-shadow:0 7px 18px rgba(18,59,109,.12);
+    }
+    .product-card-top { display:flex; justify-content:space-between; align-items:flex-start; gap:8px; }
+    .product-card-icon { width:31px; height:31px; flex:0 0 31px; display:grid; place-items:center;
+        background:#E7EEF6; color:#123B6D; border-radius:8px; font-weight:900; }
+    .product-card-name { color:#101828; font-size:.92rem; font-weight:750; line-height:1.2;
+        min-height:2.35em; overflow:hidden; }
+    .product-card-price { color:#0B294E; font-size:1.25rem; font-weight:850; margin:.15rem 0; }
+    .product-card-meta { color:#667085; font-size:.7rem; white-space:nowrap;
+        overflow:hidden; text-overflow:ellipsis; }
+    .product-card-stock { display:inline-block; border-radius:20px; padding:2px 8px;
+        background:#E7F6EF; color:#087451; font-size:.67rem; font-weight:800; }
+    .product-card-stock.low { background:#FFF2D8; color:#9A5B00; }
+    [class*="st-key-product_card_"] button { min-height:34px !important; margin-top:2px; }
+    .cart-summary-bar { display:flex; justify-content:space-between; align-items:center;
+        background:#EAF0F7; border:1px solid #D6E0EA; border-radius:9px;
+        padding:8px 11px; margin:2px 0 8px; }
+    .cart-summary-bar strong { color:#0B294E !important; font-size:.82rem; }
+    .cart-summary-bar span { color:#5F6873; font-size:.72rem; }
+    .cart-item-head { display:flex; align-items:center; justify-content:space-between;
+        gap:8px; margin-bottom:2px; }
+    .cart-item-name { color:#101828; font-size:.88rem; font-weight:760;
+        line-height:1.25; overflow:hidden; text-overflow:ellipsis; }
+    .cart-quantity-badge { flex:0 0 auto; background:#123B6D; color:#FFFFFF;
+        border-radius:20px; padding:3px 8px; font-size:.7rem; font-weight:850; }
+    .cart-line-total { color:#101828; font-size:.93rem; font-weight:800; text-align:right; }
+    .cart-unit-price { color:#667085; font-size:.68rem; text-align:right; }
+    .st-key-checkout_cart [data-testid="stVerticalBlock"] { gap:.5rem; }
     .st-key-login_shell { max-width:1120px; margin:1.5rem auto 0; }
     .st-key-login_shell > div > [data-testid="stVerticalBlock"] > [data-testid="stHorizontalBlock"] {
         gap:0 !important; align-items:stretch;
@@ -195,6 +235,12 @@ def _apply_brand_theme():
         .st-key-pos_workspace [data-testid="stForm"] { padding:12px; }
         .st-key-pos_workspace .pos-total { padding:13px 16px; }
         .st-key-pos_workspace .pos-total strong { font-size:1.65rem; }
+        .st-key-product_grid [data-testid="stHorizontalBlock"] {
+            flex-direction:row !important;
+        }
+        .st-key-product_grid [data-testid="stHorizontalBlock"] > [data-testid="stColumn"] {
+            width:33.333% !important; flex:1 1 33.333% !important;
+        }
         .st-key-login_shell { margin-top:0; }
         .st-key-login_shell > div > [data-testid="stVerticalBlock"] >
         [data-testid="stHorizontalBlock"] { flex-direction:column !important; }
@@ -209,6 +255,10 @@ def _apply_brand_theme():
         .eccos-hero { padding:12px 14px; margin-bottom:12px; }
         .eccos-copy { display:none; }
         .st-key-pos_workspace button { min-height:38px; }
+        .st-key-product_grid [data-testid="stHorizontalBlock"] { flex-direction:column !important; }
+        .st-key-product_grid [data-testid="stHorizontalBlock"] > [data-testid="stColumn"] {
+            width:100% !important; flex:1 1 100% !important;
+        }
     }
     hr { border-color:var(--line); }
     </style>
@@ -291,7 +341,7 @@ def _render_login():
         )
 
         if role_label == 'Administrador':
-            with st.form('login_form', border=False):
+            with st.form('login_form', border=False, enter_to_submit=False):
                 username = st.text_input('Usuario', placeholder='Escribe tu usuario', icon=':material/person:')
                 password = st.text_input(
                     'Contraseña', type='password', placeholder='Escribe tu contraseña',
@@ -317,7 +367,7 @@ def _render_login():
                 _log_in(_enter_seller())
 
         with st.expander('Recuperar acceso de administrador', icon=':material/key:'):
-            with st.form('recovery_form', border=False):
+            with st.form('recovery_form', border=False, enter_to_submit=False):
                 reset_username = st.text_input('Administrador')
                 reset_code = st.text_input('Código de recuperación', type='password')
                 new_password = st.text_input('Nueva contraseña (mínimo 8)', type='password')
@@ -492,7 +542,7 @@ def _payment_controls(prefix, total):
             st.session_state[cash_key] = float(total)
             st.session_state[total_key] = float(total)
         received = st.number_input(
-            'Efectivo recibido', min_value=0.0, value=float(total), step=10.0,
+            'Efectivo recibido', min_value=0.0, step=10.0,
             format='%.2f', key=cash_key,
         )
         change = max(0.0, float(received) - float(total))
@@ -508,6 +558,23 @@ def _payment_controls(prefix, total):
         details.append(f'Nota: {note}')
     return method, ' | '.join(details), validation_error
 
+
+def _set_cart_quantity(product_id, quantity):
+    quantity = int(quantity)
+    st.session_state.pos_cart[product_id] = quantity
+    st.session_state[f'cart_qty_{product_id}'] = quantity
+
+
+def _remove_from_cart(product_id):
+    st.session_state.pos_cart.pop(product_id, None)
+    st.session_state.pop(f'cart_qty_{product_id}', None)
+
+
+def _clear_cart():
+    for product_id in list(st.session_state.get('pos_cart', {})):
+        st.session_state.pop(f'cart_qty_{product_id}', None)
+    st.session_state.pos_cart = {}
+
 def _render_sales():
     _hero('Punto de venta', 'Agrega productos al carrito y completa el cobro desde una sola pantalla.', 'CAJA · TURNO ACTIVO')
     st.session_state.setdefault('pos_cart', {})
@@ -520,16 +587,16 @@ def _render_sales():
     for product_id in list(st.session_state.pos_cart):
         product = product_by_id.get(product_id)
         if product is None or product.quantity <= 0:
-            st.session_state.pos_cart.pop(product_id, None)
+            _remove_from_cart(product_id)
         else:
-            st.session_state.pos_cart[product_id] = min(
-                st.session_state.pos_cart[product_id], product.quantity
-            )
+            adjusted_quantity = min(st.session_state.pos_cart[product_id], product.quantity)
+            if adjusted_quantity != st.session_state.pos_cart[product_id]:
+                _set_cart_quantity(product_id, adjusted_quantity)
 
     # La clave crea una clase CSS estable (st-key-pos_workspace) para que esta
     # pantalla pueda responder al ancho disponible sin afectar otros módulos.
     workspace = st.container(key='pos_workspace')
-    catalog_column, checkout_column = workspace.columns((1.8, 1.2), gap='medium')
+    catalog_column, checkout_column = workspace.columns((1.45, 1.3), gap='medium')
 
     with catalog_column:
         st.markdown('<div class="pos-section">CATÁLOGO</div>', unsafe_allow_html=True)
@@ -537,70 +604,131 @@ def _render_sales():
             'Buscar productos', placeholder='Buscar por nombre o código de barras',
             icon=':material/search:', label_visibility='collapsed', key='pos_search',
         ).strip().lower()
+        filter_columns = st.columns(2)
+        stock_filter = filter_columns[0].selectbox(
+            'Mostrar', ('Todos', 'Stock suficiente', 'Por agotarse', 'En el carrito'),
+            key='pos_stock_filter')
+        sort_order = filter_columns[1].selectbox(
+            'Ordenar', ('Nombre A–Z', 'Menor precio', 'Mayor precio', 'Menor existencia'),
+            key='pos_sort_order')
         filtered = [
             product for product in available
-            if not search or search in product.name.lower() or search in (product.barcode or '').lower()
+            if not search or search in product.name.lower()
+            or search in (product.barcode or '').lower()
+            or search in (product.description or '').lower()
         ]
-        st.caption(f'{len(filtered)} productos disponibles')
+        if stock_filter == 'Stock suficiente':
+            filtered = [product for product in filtered if product.quantity > LOW_STOCK_THRESHOLD]
+        elif stock_filter == 'Por agotarse':
+            filtered = [product for product in filtered if product.quantity <= LOW_STOCK_THRESHOLD]
+        elif stock_filter == 'En el carrito':
+            filtered = [product for product in filtered
+                        if st.session_state.pos_cart.get(product.id, 0) > 0]
+        if sort_order == 'Nombre A–Z':
+            filtered.sort(key=lambda product: product.name.lower())
+        elif sort_order == 'Menor precio':
+            filtered.sort(key=lambda product: float(product.price.amount))
+        elif sort_order == 'Mayor precio':
+            filtered.sort(key=lambda product: float(product.price.amount), reverse=True)
+        else:
+            filtered.sort(key=lambda product: product.quantity)
+        st.caption(f'{len(filtered)} productos encontrados · desplázate dentro del mosaico')
 
         if not available:
             st.info('No hay productos con existencias. Agrega inventario para comenzar.', icon=':material/inventory_2:')
         elif not filtered:
             st.warning('No encontramos productos con esa búsqueda.', icon=':material/search_off:')
         else:
-            for product in filtered[:16]:
-                with st.container(border=True):
-                    st.markdown(f'**{product.name}**')
-                    barcode = f' · Código {product.barcode}' if product.barcode else ''
-                    st.caption(f'{product.quantity} disponibles{barcode}')
-                    st.markdown(f'### ${float(product.price.amount):,.2f}')
-                    in_cart = st.session_state.pos_cart.get(product.id, 0)
-                    if in_cart:
-                        st.caption(f'En la venta actual: {in_cart} unidades')
-                    button_label = f'Agregar otra · {in_cart} en venta' if in_cart else 'Agregar a la venta'
-                    if st.button(
-                        button_label, key=f'add_cart_{product.id}',
-                        icon=':material/add_shopping_cart:', width='stretch',
-                    ):
-                        current = st.session_state.pos_cart.get(product.id, 0)
-                        if current < product.quantity:
-                            st.session_state.pos_cart[product.id] = current + 1
-                            st.rerun()
-                        else:
-                            st.toast('Ya agregaste todo el stock disponible.', icon=':material/warning:')
+            product_grid = st.container(height=520, border=False, key='product_grid')
+            for row_start in range(0, len(filtered), 3):
+                card_columns = product_grid.columns(3, gap='small')
+                for column, product in zip(card_columns, filtered[row_start:row_start + 3]):
+                    with column:
+                        with st.container(border=False, key=f'product_card_{product.id}'):
+                            in_cart = st.session_state.pos_cart.get(product.id, 0)
+                            stock_class = ' low' if product.quantity <= LOW_STOCK_THRESHOLD else ''
+                            barcode = escape(product.barcode or 'Sin código')
+                            st.markdown(
+                                '<div class="product-card-top">'
+                                '<div><div class="product-card-name">'
+                                f'{escape(product.name)}</div>'
+                                f'<span class="product-card-stock{stock_class}">'
+                                f'{product.quantity} disponibles</span></div>'
+                                '<div class="product-card-icon">▦</div></div>'
+                                f'<div class="product-card-price">${float(product.price.amount):,.2f}</div>'
+                                f'<div class="product-card-meta">Código: {barcode}</div>',
+                                unsafe_allow_html=True,
+                            )
+                            if in_cart:
+                                st.caption(f'✓ {in_cart} en la venta actual')
+                            else:
+                                st.caption('Listo para agregar')
+                            button_label = f'Agregar otra ({in_cart})' if in_cart else 'Agregar'
+                            if st.button(
+                                button_label, key=f'add_cart_{product.id}',
+                                icon=':material/add_shopping_cart:', width='stretch',
+                            ):
+                                current = st.session_state.pos_cart.get(product.id, 0)
+                                if current < product.quantity:
+                                    _set_cart_quantity(product.id, current + 1)
+                                    st.rerun()
+                                else:
+                                    st.toast('Ya agregaste todo el stock disponible.',
+                                             icon=':material/warning:')
 
     with checkout_column:
         cart = st.session_state.pos_cart
         item_count = sum(cart.values())
-        st.markdown(f'<div class="pos-section">VENTA ACTUAL · {item_count} ARTÍCULOS</div>', unsafe_allow_html=True)
-        with st.container(border=True):
+        distinct_count = len(cart)
+        st.markdown('<div class="pos-section">VENTA ACTUAL</div>', unsafe_allow_html=True)
+        st.markdown(
+            '<div class="cart-summary-bar">'
+            f'<strong>{item_count} artículo{"s" if item_count != 1 else ""}</strong>'
+            f'<span>{distinct_count} producto{"s" if distinct_count != 1 else ""} distinto'
+            f'{"s" if distinct_count != 1 else ""}</span></div>',
+            unsafe_allow_html=True)
+        with st.container(border=True, key='checkout_cart'):
             if not cart:
                 st.markdown('### Tu carrito está vacío')
                 st.caption('Busca un producto y presiona Agregar para iniciar la venta.')
                 st.button('Cobrar', disabled=True, width='stretch', icon=':material/payments:')
             else:
                 total = 0.0
+                cart_items = st.container(
+                    height=270 if distinct_count > 2 else 'content',
+                    border=False, key='cart_item_list')
                 for product_id, current_quantity in list(cart.items()):
                     product = product_by_id[product_id]
                     line_total = float(product.price.amount) * current_quantity
                     total += line_total
-                    st.markdown(f'**{product.name}** — **{current_quantity} unidades**')
-                    quantity_column, line_column, remove_column = st.columns(
-                        (1.15, 1.25, .45), vertical_alignment='center'
-                    )
-                    new_quantity = quantity_column.number_input(
-                        f'Cantidad de {product.name}', min_value=1, max_value=product.quantity,
-                        value=current_quantity, step=1, key=f'cart_qty_{product_id}',
-                        label_visibility='collapsed',
-                    )
-                    if int(new_quantity) != current_quantity:
-                        st.session_state.pos_cart[product_id] = int(new_quantity)
-                        st.rerun()
-                    line_column.markdown(f'**${line_total:,.2f}**')
-                    line_column.caption(f'${float(product.price.amount):,.2f} c/u')
-                    if remove_column.button('', key=f'remove_cart_{product_id}', icon=':material/delete:'):
-                        st.session_state.pos_cart.pop(product_id, None)
-                        st.rerun()
+                    with cart_items:
+                        st.markdown(
+                            '<div class="cart-item-head">'
+                            f'<div class="cart-item-name">{escape(product.name)}</div>'
+                            f'<span class="cart-quantity-badge">× {current_quantity}</span></div>',
+                            unsafe_allow_html=True)
+                        quantity_column, line_column, remove_column = st.columns(
+                            (1.15, 1.25, .45), vertical_alignment='center'
+                        )
+                        quantity_key = f'cart_qty_{product_id}'
+                        if quantity_key not in st.session_state:
+                            st.session_state[quantity_key] = current_quantity
+                        new_quantity = quantity_column.number_input(
+                            f'Cantidad de {product.name}', min_value=1, max_value=product.quantity,
+                            step=1, key=quantity_key,
+                            label_visibility='collapsed',
+                        )
+                        if int(new_quantity) != current_quantity:
+                            _set_cart_quantity(product_id, new_quantity)
+                            st.rerun()
+                        line_column.markdown(
+                            f'<div class="cart-line-total">${line_total:,.2f}</div>'
+                            f'<div class="cart-unit-price">${float(product.price.amount):,.2f} c/u</div>',
+                            unsafe_allow_html=True)
+                        if remove_column.button('', key=f'remove_cart_{product_id}',
+                                                icon=':material/delete:'):
+                            _remove_from_cart(product_id)
+                            st.rerun()
 
                 st.markdown(
                     f'<div class="pos-total"><small>TOTAL A COBRAR</small>'
@@ -615,7 +743,7 @@ def _render_sales():
 
                 clear_column, suspend_column = st.columns(2)
                 if clear_column.button('Vaciar', width='stretch', icon=':material/delete_sweep:'):
-                    st.session_state.pos_cart = {}
+                    _clear_cart()
                     st.rerun()
                 suspend_column.button('Venta en espera', width='stretch', icon=':material/pause_circle:', disabled=True,
                                       help='Disponible próximamente')
@@ -636,7 +764,7 @@ def _render_sales():
                             )
                             transaction_entries.append((sale, int(quantity)))
                         sale_repository.insert_transaction(transaction_entries)
-                        st.session_state.pos_cart = {}
+                        _clear_cart()
                         st.toast('Venta registrada correctamente.', icon=':material/check_circle:')
                         st.rerun()
                     except Exception as error:
@@ -712,9 +840,52 @@ def _render_sales():
 # Inventario
 # ---------------------------------------------------------------------------
 
+def _render_inventory_downloads(products, key_prefix, include_cost):
+    rows = []
+    for product in products:
+        status = ('Agotado' if product.quantity <= 0 else
+                  'Por agotarse' if product.quantity <= LOW_STOCK_THRESHOLD else 'Disponible')
+        row = {
+            'Producto': product.name,
+            'Descripción': product.description or '',
+            'Código': product.barcode or '',
+            'Existencia': product.quantity,
+            'Precio de venta': float(product.price.amount),
+            'Estado': status,
+        }
+        if include_cost:
+            row['Costo'] = float(product.cost.amount)
+            row['Valor del inventario'] = float(product.cost.amount) * product.quantity
+        rows.append(row)
+    summary = [{
+        'Productos': len(products),
+        'Unidades': sum(product.quantity for product in products),
+        'Por agotarse': sum(0 < product.quantity <= LOW_STOCK_THRESHOLD for product in products),
+        'Agotados': sum(product.quantity <= 0 for product in products),
+    }]
+    sections = [('Resumen', summary), ('Inventario', rows)]
+    business = _business_export_data()
+    subtitle = f'Inventario actualizado al {date.today()}'
+    columns = st.columns(2)
+    columns[0].download_button(
+        'Descargar inventario PDF',
+        generate_pdf_bytes(business, 'Reporte de inventario', subtitle, sections),
+        f'inventario-{date.today()}.pdf', 'application/pdf',
+        key=f'{key_prefix}_inventory_pdf', icon=':material/picture_as_pdf:',
+        width='stretch')
+    columns[1].download_button(
+        'Descargar inventario Excel',
+        generate_excel_bytes(business, 'Reporte de inventario', subtitle, sections),
+        f'inventario-{date.today()}.xlsx',
+        'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+        key=f'{key_prefix}_inventory_excel', icon=':material/table_view:',
+        width='stretch')
+
+
 def _render_inventory():
     _hero('Inventario', 'Controla catálogo, precios y existencias con información lista para decidir.', 'GESTIÓN · CATÁLOGO')
-    products = RepositoryFactory.get_product_repository().get_all_products()
+    products = [product for product in RepositoryFactory.get_product_repository().get_all_products()
+                if not product.is_temporary]
 
     with st.expander('Agregar producto'):
         with st.form('add_product_form', clear_on_submit=True, enter_to_submit=False):
@@ -750,6 +921,7 @@ def _render_inventory():
         'ID': p.id, 'Nombre': p.name, 'Precio': str(p.price), 'Costo': str(p.cost),
         'Cantidad': p.quantity, 'Código de barras': p.barcode or '',
     } for p in products]), width='stretch', hide_index=True)
+    _render_inventory_downloads(products, 'admin', include_cost=True)
 
     with st.expander('Editar o eliminar producto'):
         names = [p.name for p in products]
@@ -788,7 +960,8 @@ def _render_inventory():
 def _render_inventory_readonly():
     _hero('Consulta de inventario', 'Revisa precios y existencias sin modificar el catálogo.',
           'VENDEDOR · SOLO LECTURA')
-    products = RepositoryFactory.get_product_repository().get_all_products()
+    products = [product for product in RepositoryFactory.get_product_repository().get_all_products()
+                if not product.is_temporary]
     search = st.text_input('Buscar inventario', placeholder='Nombre o código de barras',
                            icon=':material/search:', label_visibility='collapsed').strip().lower()
     visible = [p for p in products if not search or search in p.name.lower()
@@ -807,6 +980,7 @@ def _render_inventory_readonly():
         'Precio de venta': st.column_config.NumberColumn(format='$ %.2f'),
         'Disponibles': st.column_config.NumberColumn(format='%d'),
     }, width='stretch', hide_index=True)
+    _render_inventory_downloads(visible, 'seller', include_cost=False)
     st.caption('Solo consulta: el vendedor no puede editar costos, precios ni existencias.')
 
 
@@ -1067,9 +1241,10 @@ def _render_quotes():
                                  + '; '.join(unavailable), icon=':material/error:')
                     else:
                         for product_id, required_quantity in required.items():
-                            current_cart[product_id] = current_cart.get(product_id, 0) + required_quantity
+                            _set_cart_quantity(
+                                product_id, current_cart.get(product_id, 0) + required_quantity)
                         RepositoryFactory.get_quote_repository().update_status(quote.id, 'Aceptada')
-                        st.session_state['page'] = 'Canal de venta'
+                        st.session_state['page'] = 'Nueva venta'
                         st.rerun()
 
                 secondary_actions = st.columns(2)
@@ -1088,7 +1263,7 @@ def _render_quotes():
 def _render_expenses():
     _hero('Gastos operativos', 'Registra y consulta egresos para mantener visible la rentabilidad real.', 'FINANZAS · EGRESOS')
     with st.expander('Agregar gasto'):
-        with st.form('add_expense_form'):
+        with st.form('add_expense_form', enter_to_submit=False):
             name = st.text_input('Nombre')
             description = st.text_area('Descripción', height=68)
             spent_money = st.number_input('Dinero gastado', min_value=0.01, step=1.0, format='%.2f')
@@ -1148,6 +1323,315 @@ def _summary_for_range(initial_date: date, final_date: date):
         'total_profit': total_profit, 'total_expense': total_expense,
         'net_profit': total_profit - total_expense, 'sales': sales, 'expenses': expenses,
     }
+
+
+def _cash_close_summary(close_date: date):
+    result = _summary_for_range(close_date, close_date)
+    totals = {'Efectivo': 0.0, 'Tarjeta': 0.0, 'Transferencia': 0.0, 'Otros': 0.0}
+    operations = set()
+    for sale in result['sales']:
+        amount = float(sale.price.amount)
+        method = (sale.payment_method or '').strip().lower()
+        if method == 'efectivo' or method == 'cash':
+            totals['Efectivo'] += amount
+        elif method == 'tarjeta':
+            totals['Tarjeta'] += amount
+        elif method == 'transferencia':
+            totals['Transferencia'] += amount
+        else:
+            totals['Otros'] += amount
+        operations.add(sale.transaction_id or f'legacy-{sale.id}')
+    return result, totals, len(operations)
+
+
+def _cash_close_rows(cash_close):
+    values = (
+        ('Fecha', str(cash_close.date)),
+        ('Responsable', cash_close.cashier),
+        ('Operaciones', cash_close.operation_count),
+        ('Ventas totales', float(cash_close.total_sales.amount)),
+        ('Ventas en efectivo', float(cash_close.cash_sales.amount)),
+        ('Ventas con tarjeta', float(cash_close.card_sales.amount)),
+        ('Transferencias', float(cash_close.transfer_sales.amount)),
+        ('Otros métodos', float(cash_close.other_sales.amount)),
+        ('Gastos totales', float(cash_close.total_expenses.amount)),
+        ('Gastos pagados desde caja', float(cash_close.cash_expenses.amount)),
+        ('Fondo inicial', float(cash_close.opening_cash.amount)),
+        ('Entradas adicionales', float(cash_close.cash_additions.amount)),
+        ('Retiros de efectivo', float(cash_close.cash_withdrawals.amount)),
+        ('Efectivo esperado', float(cash_close.expected_cash.amount)),
+        ('Efectivo contado', float(cash_close.counted_cash.amount)),
+        ('Diferencia', float(cash_close.difference.amount)),
+        ('Observaciones', cash_close.notes or 'Sin observaciones'),
+    )
+    return [{'Concepto': concept, 'Valor': value} for concept, value in values]
+
+
+def _render_cash_close():
+    _hero('Corte de caja',
+          'Concilia ventas, gastos y efectivo físico con un cierre claro y auditable.',
+          'CAJA · CONTROL DIARIO')
+    selected_date = st.date_input('Fecha del corte', value=date.today(), key='cash_close_date')
+    result, payment_totals, operation_count = _cash_close_summary(selected_date)
+    total_sales = sum(payment_totals.values())
+    total_expenses = float(result['total_expense'].amount)
+    user = st.session_state['user']
+    is_admin = _is_administrator()
+    repository = RepositoryFactory.get_cash_close_repository()
+    control_repository = RepositoryFactory.get_cash_control_repository()
+    existing_close = repository.get_by_date(selected_date)
+    opening = control_repository.get_opening(selected_date)
+    movements = control_repository.get_movements(selected_date)
+    movement_totals = control_repository.totals_for_date(selected_date)
+
+    st.markdown('#### Resumen del sistema')
+    overview = st.columns(6)
+    overview[0].metric('Operaciones', operation_count)
+    overview[1].metric('Ventas totales', f'${total_sales:,.2f}')
+    overview[2].metric('Efectivo', f"${payment_totals['Efectivo']:,.2f}")
+    overview[3].metric('Tarjeta', f"${payment_totals['Tarjeta']:,.2f}")
+    overview[4].metric('Transferencia', f"${payment_totals['Transferencia']:,.2f}")
+    overview[5].metric('Gastos registrados', f'${total_expenses:,.2f}')
+
+    st.markdown('#### Apertura y seguridad de efectivo')
+    if opening is None:
+        if is_admin and selected_date == date.today() and existing_close is None:
+            st.warning('La caja todavía no ha sido abierta. Define el fondo de cambio antes de vender.',
+                       icon=':material/lock_open:')
+            opening_columns = st.columns(2)
+            opening_amount = opening_columns[0].number_input(
+                'Fondo inicial para cambio', min_value=0.0, value=0.0, step=100.0,
+                format='%.2f', key=f'cash_opening_amount_{selected_date}')
+            cash_limit = opening_columns[1].number_input(
+                'Límite máximo recomendado en caja', min_value=100.0, value=3000.0,
+                step=500.0, format='%.2f', key=f'cash_opening_limit_{selected_date}',
+                help='Al superar este nivel, el sistema recomendará un retiro de seguridad.')
+            opening_notes = st.text_input(
+                'Nota de apertura', placeholder='Ej. Fondo entregado en billetes y monedas',
+                key=f'cash_opening_notes_{selected_date}')
+            if st.button('Abrir caja', type='primary', icon=':material/lock_open:',
+                         width='stretch', key=f'cash_opening_submit_{selected_date}'):
+                administrator = (getattr(user, 'display_name', '')
+                                 or getattr(user, 'username', '') or 'Administrador')
+                try:
+                    control_repository.open_day(CashOpening(
+                        date=selected_date, opening_amount=CUPMoney(f'{float(opening_amount):.2f}'),
+                        cash_limit=CUPMoney(f'{float(cash_limit):.2f}'),
+                        opened_by=administrator, notes=opening_notes.strip()), user.role)
+                    st.success('Caja abierta correctamente.', icon=':material/check_circle:')
+                    st.rerun()
+                except Exception as error:
+                    st.error(str(error), icon=':material/error:')
+        elif existing_close is None:
+            st.warning('El administrador debe abrir la caja y definir el fondo inicial antes del corte.',
+                       icon=':material/admin_panel_settings:')
+    else:
+        estimated_drawer_cash = (float(opening.opening_amount.amount)
+                                 + payment_totals['Efectivo']
+                                 + movement_totals['Entrada'] - movement_totals['Retiro'])
+        opening_metrics = st.columns(4)
+        opening_metrics[0].metric('Fondo inicial', f'${float(opening.opening_amount.amount):,.2f}')
+        opening_metrics[1].metric('Entradas autorizadas', f"${movement_totals['Entrada']:,.2f}")
+        opening_metrics[2].metric('Retiros autorizados', f"${movement_totals['Retiro']:,.2f}")
+        opening_metrics[3].metric('Efectivo estimado', f'${estimated_drawer_cash:,.2f}')
+        st.caption(f'Caja abierta por {opening.opened_by} · Límite recomendado: '
+                   f'${float(opening.cash_limit.amount):,.2f} · {opening.notes or "Sin nota"}')
+        if estimated_drawer_cash > float(opening.cash_limit.amount) and existing_close is None:
+            st.error(
+                f'El efectivo estimado supera el límite por '
+                f'${estimated_drawer_cash - float(opening.cash_limit.amount):,.2f}. '
+                'Se recomienda que el administrador realice un retiro de seguridad.',
+                icon=':material/security:')
+
+        if is_admin and selected_date == date.today() and existing_close is None:
+            with st.expander('Registrar entrada o retiro autorizado',
+                             icon=':material/admin_panel_settings:'):
+                movement_type = st.segmented_control(
+                    'Tipo de movimiento', ('Retiro', 'Entrada'), default='Retiro',
+                    selection_mode='single', key=f'cash_movement_type_{selected_date}') or 'Retiro'
+                movement_columns = st.columns(2)
+                movement_amount = movement_columns[0].number_input(
+                    'Importe', min_value=0.01, value=100.0, step=100.0, format='%.2f',
+                    key=f'cash_movement_amount_{selected_date}')
+                reason_options = (
+                    ('Retiro de seguridad', 'Pago autorizado', 'Depósito bancario', 'Otro')
+                    if movement_type == 'Retiro'
+                    else ('Cambio adicional', 'Reintegro', 'Entrada autorizada', 'Otro'))
+                reason_category = movement_columns[1].selectbox(
+                    'Motivo', reason_options, key=f'cash_movement_reason_category_{selected_date}')
+                reason_detail = st.text_input(
+                    'Detalle obligatorio', placeholder='Explica el destino u origen del efectivo',
+                    key=f'cash_movement_reason_detail_{selected_date}')
+                if st.button('Autorizar movimiento', type='primary',
+                             icon=':material/currency_exchange:', width='stretch',
+                             key=f'cash_movement_submit_{selected_date}'):
+                    administrator = (getattr(user, 'display_name', '')
+                                     or getattr(user, 'username', '') or 'Administrador')
+                    reason = f'{reason_category}: {reason_detail.strip()}'
+                    if not reason_detail.strip():
+                        st.error('Escribe el detalle y destino u origen del dinero.',
+                                 icon=':material/error:')
+                    else:
+                        try:
+                            control_repository.add_movement(CashMovement(
+                                date=selected_date, movement_type=movement_type,
+                                amount=CUPMoney(f'{float(movement_amount):.2f}'),
+                                reason=reason, authorized_by=administrator), user.role,
+                                available_cash=max(0.0, estimated_drawer_cash))
+                            st.success('Movimiento autorizado y registrado.',
+                                       icon=':material/check_circle:')
+                            st.rerun()
+                        except Exception as error:
+                            st.error(str(error), icon=':material/error:')
+
+        if movements:
+            st.markdown('##### Bitácora de movimientos')
+            st.dataframe(pd.DataFrame([{
+                'Hora': movement.created_at.strftime('%H:%M:%S'),
+                'Tipo': movement.movement_type,
+                'Importe': float(movement.amount.amount),
+                'Motivo': movement.reason,
+                'Autorizó': movement.authorized_by,
+            } for movement in movements]), column_config={
+                'Importe': st.column_config.NumberColumn(format='$ %.2f'),
+            }, hide_index=True, width='stretch')
+
+    if existing_close is not None:
+        st.info(f'El corte de {selected_date} ya fue cerrado por {existing_close.cashier}. '
+                'Se conserva bloqueado para proteger la auditoría.', icon=':material/lock:')
+    elif opening is not None:
+        responsible = st.text_input(
+            'Responsable del corte *',
+            value=getattr(user, 'display_name', '') or getattr(user, 'username', '') or 'Vendedor',
+            key=f'cash_close_responsible_{selected_date}',
+        )
+        cash_expenses = st.number_input(
+            'Gastos pagados desde caja', min_value=0.0, value=total_expenses, step=10.0,
+            format='%.2f', key=f'cash_close_expenses_{selected_date}',
+            help='Ajusta este importe si algún gasto se pagó por transferencia o tarjeta.')
+        opening_cash = float(opening.opening_amount.amount)
+        cash_additions = movement_totals['Entrada']
+        cash_withdrawals = movement_totals['Retiro']
+        expected_cash = (opening_cash + payment_totals['Efectivo']
+                         + cash_additions - cash_withdrawals
+                         - float(cash_expenses))
+
+        use_denominations = st.toggle(
+            'Conteo asistido por billetes y monedas', value=True,
+            key=f'cash_close_use_denominations_{selected_date}')
+        if use_denominations:
+            denominations = (
+                ('Billete $1,000', 1000.0), ('Billete $500', 500.0),
+                ('Billete $200', 200.0), ('Billete $100', 100.0),
+                ('Billete $50', 50.0), ('Billete $20', 20.0),
+                ('Moneda $20', 20.0), ('Moneda $10', 10.0), ('Moneda $5', 5.0),
+                ('Moneda $2', 2.0), ('Moneda $1', 1.0), ('Moneda $0.50', .5),
+            )
+            counted_cash = 0.0
+            denomination_columns = st.columns(4)
+            for index, (label, denomination) in enumerate(denominations):
+                pieces = denomination_columns[index % 4].number_input(
+                    label, min_value=0, value=0, step=1,
+                    key=f'cash_close_denomination_{selected_date}_{index}')
+                counted_cash += int(pieces) * denomination
+            st.metric('Total contado por denominaciones', f'${counted_cash:,.2f}')
+        else:
+            counted_cash = st.number_input(
+                'Efectivo contado', min_value=0.0, value=max(0.0, expected_cash),
+                step=100.0, format='%.2f', key=f'cash_close_counted_{selected_date}')
+
+        difference = float(counted_cash) - expected_cash
+        reconciliation = st.columns(3)
+        reconciliation[0].metric('Efectivo esperado', f'${expected_cash:,.2f}')
+        reconciliation[1].metric('Efectivo contado', f'${float(counted_cash):,.2f}')
+        reconciliation[2].metric(
+            'Diferencia', f'${difference:,.2f}',
+            delta='Cuadra' if abs(difference) < .005 else ('Sobrante' if difference > 0 else 'Faltante'),
+            delta_color='normal' if difference >= 0 else 'inverse')
+        if abs(difference) < .005:
+            st.success('La caja cuadra correctamente.', icon=':material/check_circle:')
+        elif difference < 0:
+            st.error(f'Hay un faltante de ${abs(difference):,.2f}. Revisa el conteo y los movimientos.',
+                     icon=':material/error:')
+        else:
+            st.warning(f'Hay un sobrante de ${difference:,.2f}. Registra una observación.',
+                       icon=':material/warning:')
+
+        notes = st.text_area(
+            'Observaciones', placeholder='Incidencias, retiros, depósitos o explicación de diferencias',
+            key=f'cash_close_notes_{selected_date}')
+        confirmed = st.checkbox(
+            'Confirmo que conté el efectivo y revisé los movimientos del día.',
+            key=f'cash_close_confirmed_{selected_date}')
+        if st.button('Cerrar caja', type='primary', icon=':material/point_of_sale:',
+                     width='stretch', key=f'cash_close_submit_{selected_date}'):
+            if not responsible.strip():
+                st.error('Indica el responsable del corte.', icon=':material/error:')
+            elif not confirmed:
+                st.error('Confirma la revisión antes de cerrar la caja.', icon=':material/error:')
+            elif abs(difference) >= .005 and not notes.strip():
+                st.error('Explica el sobrante o faltante en Observaciones.', icon=':material/error:')
+            else:
+                cash_close = CashClose(
+                    date=selected_date, cashier=responsible.strip(), operation_count=operation_count,
+                    total_sales=CUPMoney(f'{total_sales:.2f}'),
+                    cash_sales=CUPMoney(f"{payment_totals['Efectivo']:.2f}"),
+                    card_sales=CUPMoney(f"{payment_totals['Tarjeta']:.2f}"),
+                    transfer_sales=CUPMoney(f"{payment_totals['Transferencia']:.2f}"),
+                    other_sales=CUPMoney(f"{payment_totals['Otros']:.2f}"),
+                    total_expenses=CUPMoney(f'{total_expenses:.2f}'),
+                    cash_expenses=CUPMoney(f'{float(cash_expenses):.2f}'),
+                    opening_cash=CUPMoney(f'{float(opening_cash):.2f}'),
+                    cash_additions=CUPMoney(f'{float(cash_additions):.2f}'),
+                    cash_withdrawals=CUPMoney(f'{float(cash_withdrawals):.2f}'),
+                    expected_cash=CUPMoney(f'{expected_cash:.2f}'),
+                    counted_cash=CUPMoney(f'{float(counted_cash):.2f}'),
+                    difference=CUPMoney(f'{difference:.2f}'), notes=notes.strip())
+                try:
+                    repository.insert(cash_close)
+                    st.success(f'Corte #{cash_close.id} guardado correctamente.',
+                               icon=':material/check_circle:')
+                    st.rerun()
+                except Exception as error:
+                    st.error(f'No se pudo guardar el corte: {error}', icon=':material/error:')
+
+    st.markdown('#### Historial de cortes')
+    cash_closes = repository.get_all()
+    if not cash_closes:
+        st.caption('Todavía no hay cortes de caja guardados.')
+        return
+    business = _business_export_data()
+    for cash_close in cash_closes[:30]:
+        difference = float(cash_close.difference.amount)
+        status = 'Cuadrado' if abs(difference) < .005 else ('Sobrante' if difference > 0 else 'Faltante')
+        with st.expander(
+                f'#{cash_close.id} · {cash_close.date} · {cash_close.cashier} · {status}',
+                icon=':material/receipt_long:'):
+            history_metrics = st.columns(4)
+            history_metrics[0].metric('Ventas', f'${float(cash_close.total_sales.amount):,.2f}')
+            history_metrics[1].metric('Esperado', f'${float(cash_close.expected_cash.amount):,.2f}')
+            history_metrics[2].metric('Contado', f'${float(cash_close.counted_cash.amount):,.2f}')
+            history_metrics[3].metric('Diferencia', f'${difference:,.2f}')
+            st.caption(cash_close.notes or 'Sin observaciones')
+            rows = _cash_close_rows(cash_close)
+            export_columns = st.columns(2)
+            export_columns[0].download_button(
+                'Descargar PDF',
+                generate_pdf_bytes(business, f'Corte de caja #{cash_close.id}',
+                                   f'Fecha: {cash_close.date} · Responsable: {cash_close.cashier}',
+                                   [('Conciliación', rows)]),
+                f'corte-caja-{cash_close.date}.pdf', 'application/pdf',
+                key=f'cash_close_pdf_{cash_close.id}', icon=':material/picture_as_pdf:',
+                width='stretch')
+            export_columns[1].download_button(
+                'Descargar Excel',
+                generate_excel_bytes(business, f'Corte de caja #{cash_close.id}',
+                                     f'Fecha: {cash_close.date} · Responsable: {cash_close.cashier}',
+                                     [('Conciliación', rows)]),
+                f'corte-caja-{cash_close.date}.xlsx',
+                'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+                key=f'cash_close_excel_{cash_close.id}', icon=':material/table_view:',
+                width='stretch')
 
 
 def _render_reports():
@@ -1288,7 +1772,7 @@ def _render_business_profile():
     _hero('Identidad del negocio', 'Mantén actualizados los datos que representan a tu empresa.', 'CONFIGURACIÓN · MARCA')
     repository = RepositoryFactory.get_business_profile_repository()
     profile = repository.get_profile()
-    with st.form('business_profile_form'):
+    with st.form('business_profile_form', enter_to_submit=False):
         business_name = st.text_input('Nombre comercial', value=profile.business_name or '')
         owner_name = st.text_input('Responsable', value=profile.owner_name or '')
         phone = st.text_input('Teléfono', value=profile.phone or '')
@@ -1309,14 +1793,16 @@ def _render_business_profile():
 
 ADMIN_PAGES = {
     'Tablero': _render_dashboard, 'Ventas': _render_sales, 'Inventario': _render_inventory,
-    'Gastos': _render_expenses, 'Reportes': _render_reports, 'Estadísticas': _render_statistics,
+    'Corte de caja': _render_cash_close, 'Gastos': _render_expenses,
+    'Reportes': _render_reports, 'Estadísticas': _render_statistics,
     'Mi negocio': _render_business_profile,
 }
 SELLER_PAGES = {
-    'Canal de venta': _render_sales,
+    'Nueva venta': _render_sales,
     'Cotizaciones': _render_quotes,
     'Inventario': _render_inventory_readonly,
     'Venta express': _render_express_sale,
+    'Corte de caja': _render_cash_close,
 }
 
 

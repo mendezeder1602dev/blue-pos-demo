@@ -127,6 +127,54 @@ class Expense(Base):
     date = Column(Date, nullable=False, default=date.today)
 
 
+class CashOpening(Base):
+    """Apertura diaria definida exclusivamente por administración."""
+    __tablename__ = 'cash_openings'
+    id = Column(Integer, primary_key=True)
+    date = Column(Date, nullable=False, unique=True, index=True)
+    opening_amount = Column(MoneyColumn(), nullable=False, default=CUPMoney('0.00'))
+    cash_limit = Column(MoneyColumn(), nullable=False, default=CUPMoney('3000.00'))
+    opened_by = Column(String(length=120), nullable=False)
+    notes = Column(String(length=400), nullable=True, default='')
+    created_at = Column(DateTime, nullable=False, default=datetime.now)
+
+
+class CashMovement(Base):
+    """Entrada o retiro autorizado que modifica el efectivo físico de caja."""
+    __tablename__ = 'cash_movements'
+    id = Column(Integer, primary_key=True)
+    date = Column(Date, nullable=False, index=True)
+    movement_type = Column(String(length=20), nullable=False)
+    amount = Column(MoneyColumn(), nullable=False)
+    reason = Column(String(length=300), nullable=False)
+    authorized_by = Column(String(length=120), nullable=False)
+    created_at = Column(DateTime, nullable=False, default=datetime.now)
+
+
+class CashClose(Base):
+    """Fotografía inmutable de la conciliación diaria de caja."""
+    __tablename__ = 'cash_closes'
+    id = Column(Integer, primary_key=True)
+    date = Column(Date, nullable=False, unique=True, index=True)
+    cashier = Column(String(length=120), nullable=False)
+    operation_count = Column(Integer, nullable=False, default=0)
+    total_sales = Column(MoneyColumn(), nullable=False, default=CUPMoney('0.00'))
+    cash_sales = Column(MoneyColumn(), nullable=False, default=CUPMoney('0.00'))
+    card_sales = Column(MoneyColumn(), nullable=False, default=CUPMoney('0.00'))
+    transfer_sales = Column(MoneyColumn(), nullable=False, default=CUPMoney('0.00'))
+    other_sales = Column(MoneyColumn(), nullable=False, default=CUPMoney('0.00'))
+    total_expenses = Column(MoneyColumn(), nullable=False, default=CUPMoney('0.00'))
+    cash_expenses = Column(MoneyColumn(), nullable=False, default=CUPMoney('0.00'))
+    opening_cash = Column(MoneyColumn(), nullable=False, default=CUPMoney('0.00'))
+    cash_additions = Column(MoneyColumn(), nullable=False, default=CUPMoney('0.00'))
+    cash_withdrawals = Column(MoneyColumn(), nullable=False, default=CUPMoney('0.00'))
+    expected_cash = Column(MoneyColumn(), nullable=False, default=CUPMoney('0.00'))
+    counted_cash = Column(MoneyColumn(), nullable=False, default=CUPMoney('0.00'))
+    difference = Column(MoneyColumn(), nullable=False, default=CUPMoney('0.00'))
+    notes = Column(String(length=600), nullable=True, default='')
+    created_at = Column(DateTime, nullable=False, default=datetime.now)
+
+
 class BusinessProfile(Base):
     __tablename__ = 'business_profile'
     id = Column(Integer, primary_key=True)
