@@ -24,9 +24,13 @@ class UserRepository:
         """Crea el único jefe de tienda y migra el nombre corporativo previo."""
         administrator = self.__session.scalars(select(User).where(User.role == 'superuser')).first()
         if administrator is None:
-            username = os.getenv('BLUE_POS_ADMIN_USER', 'Administrador')
-            password = os.getenv('BLUE_POS_ADMIN_PASSWORD', 'AdministradorGeneral')
-            recovery_code = os.getenv('BLUE_POS_RECOVERY_CODE', '1602')
+            username = os.getenv('BLUE_POS_ADMIN_USER')
+            password = os.getenv('BLUE_POS_ADMIN_PASSWORD')
+            recovery_code = os.getenv('BLUE_POS_RECOVERY_CODE')
+            if not username or not password or not recovery_code:
+                raise RuntimeError(
+                    'Configura BLUE_POS_ADMIN_USER, BLUE_POS_ADMIN_PASSWORD y '
+                    'BLUE_POS_RECOVERY_CODE como secretos privados antes de iniciar el sistema.')
             administrator = self.create(username, password, recovery_code,
                                         'superuser', 'Administrador', 'primary')
             administrator.credential_version = 2
@@ -35,15 +39,9 @@ class UserRepository:
         if administrator.username == 'GrupoEccos':
             administrator.username = 'Administrador'
             administrator.display_name = 'Administrador'
-            administrator.password_hash = self._hash('AdministradorGeneral')
             administrator.workspace_key = 'primary'
         # Se actualiza una única vez para migrar credenciales creadas con la
         # configuración anterior. Después, el cambio de contraseña persiste.
-        if administrator.username == 'Administrador' and administrator.credential_version < 2:
-            administrator.password_hash = self._hash('AdministradorGeneral')
-            administrator.recovery_hash = self._hash('1602')
-            administrator.credential_version = 2
-            self.__session.commit()
         return administrator
     def create(self, username, password, recovery_code, role='store', display_name='', workspace_key='primary'):
         if not username or len(password) < 8 or len(recovery_code) < 4: raise ValueError('Usuario, contraseña de 8 caracteres y código de recuperación son obligatorios.')
