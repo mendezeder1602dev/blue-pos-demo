@@ -1,6 +1,6 @@
 from sqlalchemy.orm import Session
 from model.entity.models import Product, Sale
-from sqlalchemy import select, delete, cast, Float
+from sqlalchemy import select, delete, update, cast, Float
 
 from model.repository.exc.product import UniqueProductNameException, NonExistentProductException, \
     InvalidProductQuantityException, NoPositivePriceException, EmptyProductNameException, NegativeCostException, UniqueProductBarcodeException
@@ -89,6 +89,7 @@ class ProductRepository(RepositoryObserver):
         self.__session = session
 
     def insert_product(self, product: Product):
+        product.name = self.__normalize_name(product.name)
         self.__check_name_is_not_empty_or_whitespaces(product.name)
         self.__check_correctness_of_quantity(product)
         self.__check_correctness_of_price(product)
@@ -126,10 +127,13 @@ class ProductRepository(RepositoryObserver):
             raise UniqueProductNameException(found_product.name)
 
     def __find_product_by_name(self, name: str) -> Product:
-        return self.__session.scalar(
-            select(Product)
-            .where(Product.name.ilike(name))
-        )
+        normalized_name = self.__normalize_name(name).casefold()
+        return next((existing for existing in self.__session.scalars(select(Product)).all()
+                     if self.__normalize_name(existing.name).casefold() == normalized_name), None)
+
+    @staticmethod
+    def __normalize_name(name: str) -> str:
+        return ' '.join((name or '').split())
 
     def get_product_by_barcode(self, barcode: str) -> Product:
         return self.__session.scalar(select(Product).where(Product.barcode == barcode.strip()))
@@ -141,12 +145,18 @@ class ProductRepository(RepositoryObserver):
             return
         found_product = self.get_product_by_barcode(barcode)
         if found_product is not None and found_product.id != product.id:
-            raise UniqueProductBarcodeException(barcode)
+            raise UniqueProductBarcodeException(barcode, found_product.name)
 
     def delete_product(self, product: Product):
         found_product = self.__check_product_exists(product)
-
         self.__session.delete(found_product)
+        self.__session.commit()
+        self._notify_on_data_changed_listeners()
+
+    def archive_product(self, product: Product):
+        """Baja segura usada por el POS: oculta el producto y conserva sus ventas."""
+        found_product = self.__check_product_exists(product)
+        found_product.is_active = False
         self.__session.commit()
         self._notify_on_data_changed_listeners()
 
@@ -190,6 +200,7 @@ class ProductRepository(RepositoryObserver):
                                .where(Product.id.in_(product_id_list)))
 
     def update_product(self, new: Product):
+        new.name = self.__normalize_name(new.name)
         self.__check_name_is_not_empty_or_whitespaces(new.name)
         self.__check_correctness_of_quantity(new)
         self.__check_correctness_of_price(new)
@@ -204,7 +215,12 @@ class ProductRepository(RepositoryObserver):
         old.cost = new.cost
         old.quantity = new.quantity
         old.barcode = new.barcode
-        old.image_path = new.image_path
+        old.image_path = new.image_path if new.image_path is not None else old.image_path
+        old.category = new.category if new.category is not None else old.category
+        old.supplier = new.supplier if new.supplier is not None else old.supplier
+        old.minimum_stock = (new.minimum_stock if new.minimum_stock is not None
+                             else old.minimum_stock)
+        old.is_active = new.is_active if new.is_active is not None else old.is_active
 
         self.__session.flush()
         self.__session.commit()
@@ -216,14 +232,15 @@ class ProductRepository(RepositoryObserver):
             raise UniqueProductNameException(new.name)
 
     def get_all_products(self) -> list:
-        return self.__session.scalars(select(Product).where(Product.is_temporary == False)).all()
+        return self.__session.scalars(select(Product).where(
+            Product.is_temporary == False, Product.is_active == True)).all()
 
     def get_products_by_filter(self, the_filter: ProductFilter) -> list:
         filter_query = self.__create_filter_query(the_filter)
         return self.__session.scalars(filter_query).all()
 
     def __create_filter_query(self, the_filter: ProductFilter):
-        query = select(Product)
+        query = select(Product).where(Product.is_active == True)
         if the_filter.id is not None:
             query = query.where(Product.id == the_filter.id)
 

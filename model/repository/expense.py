@@ -1,5 +1,5 @@
 from money import Money
-from sqlalchemy import select, delete, or_
+from sqlalchemy import select, delete, update, or_
 from sqlalchemy.orm import Session
 from model.entity.models import Expense
 from model.repository.exc.expense import UniqueExpenseNameException, EmptyExpenseNameException, \
@@ -96,6 +96,15 @@ class ExpenseRepository:
         self.__execute_delete_statement(expense_ids)
         self.__session.commit()
 
+    def archive_expenses(self, expense_ids: list):
+        if not expense_ids:
+            return
+        self.__check_expense_ids_are_assigned_in_database(expense_ids)
+        self.__session.execute(
+            update(Expense).where(Expense.id.in_(expense_ids)).values(is_active=False)
+        )
+        self.__session.commit()
+
     def __check_expense_ids_are_assigned_in_database(self, expenses_ids: list):
         found_expenses_rows = self.__session.execute(
             select(Expense.id)
@@ -135,7 +144,7 @@ class ExpenseRepository:
         ).first()
 
     def get_all_expenses(self) -> list:
-        return self.__session.scalars(select(Expense)).all()
+        return self.__session.scalars(select(Expense).where(Expense.is_active == True)).all()
 
     def get_expenses_by_filter(self, the_filter: ExpenseFilter):
         filter_query = self.__create_filter_query(the_filter)
@@ -143,7 +152,7 @@ class ExpenseRepository:
 
     @staticmethod
     def __create_filter_query(the_filter: ExpenseFilter):
-        query = select(Expense)
+        query = select(Expense).where(Expense.is_active == True)
 
         if the_filter.minimum_date is not None:
             query = query.where(Expense.date >= the_filter.minimum_date)

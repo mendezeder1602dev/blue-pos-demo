@@ -13,6 +13,7 @@ from model.repository.user import UserRepository
 from model.repository.quote import QuoteRepository
 from model.repository.cash_close import CashCloseRepository
 from model.repository.cash_control import CashControlRepository
+from model.repository.operations import OperationsRepository
 
 
 __BLUE_POS_FOLDER_PATH = Path(os.path.join(str(Path.home()), '.blue-pos/'))
@@ -23,8 +24,10 @@ if not __BLUE_POS_FOLDER_PATH.exists():
 __BLUE_POS_DB_PATH = str(os.path.join(str(__BLUE_POS_FOLDER_PATH), 'data.db'))
 __BLUE_POS_AUTH_DB_PATH = str(os.path.join(str(__BLUE_POS_FOLDER_PATH), 'accounts.db'))
 
-DB_URL = f'sqlite:///{__BLUE_POS_DB_PATH}?check_same_thread=False'
-AUTH_DB_URL = f'sqlite:///{__BLUE_POS_AUTH_DB_PATH}?check_same_thread=False'
+DB_URL = os.environ.get('BLUE_POS_DATABASE_URL', f'sqlite:///{__BLUE_POS_DB_PATH}?check_same_thread=False')
+AUTH_DB_URL = os.environ.get(
+    'BLUE_POS_AUTH_DATABASE_URL',
+    os.environ.get('BLUE_POS_DATABASE_URL', f'sqlite:///{__BLUE_POS_AUTH_DB_PATH}?check_same_thread=False'))
 
 
 class RepositoryFactory:
@@ -44,6 +47,7 @@ class RepositoryFactory:
     __quote_repository = None
     __cash_close_repository = None
     __cash_control_repository = None
+    __operations_repository = None
 
     @staticmethod
     def activate_workspace(url: str):
@@ -69,9 +73,12 @@ class RepositoryFactory:
         RepositoryFactory.__quote_repository = None
         RepositoryFactory.__cash_close_repository = None
         RepositoryFactory.__cash_control_repository = None
+        RepositoryFactory.__operations_repository = None
 
     @staticmethod
     def workspace_url(workspace_key: str) -> str:
+        if os.environ.get('BLUE_POS_DATABASE_URL'):
+            return DB_URL
         if not workspace_key or workspace_key == 'primary':
             return DB_URL
         safe_name = ''.join(char for char in workspace_key if char.isalnum() or char in ('-', '_'))
@@ -165,6 +172,17 @@ class RepositoryFactory:
         return RepositoryFactory.__cash_control_repository
 
     @staticmethod
+    def get_operations_repository(url: str = None):
+        RepositoryFactory.__create_session_if_necessary(url)
+        if RepositoryFactory.__operations_repository is None:
+            RepositoryFactory.__operations_repository = OperationsRepository(RepositoryFactory.__session)
+        return RepositoryFactory.__operations_repository
+
+    @staticmethod
+    def active_database_url():
+        return RepositoryFactory.__url or DB_URL
+
+    @staticmethod
     def get_user_repository():
         """Repositorio de credenciales separado de las ventas e inventario."""
         if RepositoryFactory.__auth_session is None:
@@ -206,6 +224,7 @@ class RepositoryFactory:
         RepositoryFactory.__quote_repository = None
         RepositoryFactory.__cash_close_repository = None
         RepositoryFactory.__cash_control_repository = None
+        RepositoryFactory.__operations_repository = None
         RepositoryFactory.__auth_session = None
         RepositoryFactory.__auth_engine = None
         RepositoryFactory.__auth_user_repository = None

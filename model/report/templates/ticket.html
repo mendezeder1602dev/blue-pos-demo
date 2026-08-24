@@ -11,18 +11,24 @@
     table { width: 100%; border-collapse: collapse; }
     th { color: #52677A; font-size: 7.5pt; text-align: left; padding-bottom: 4px; }
     td { padding: 3px 0; vertical-align: top; } .amount { text-align: right; }
-    .total { font-size: 13pt; font-weight: bold; color: #0D2942; }
+    .total { font-size: 13pt; font-weight: bold; color: {{ business.brand_color or '#0D2942' }}; }
+    .logo { display:block; max-width:34mm; max-height:18mm; margin:0 auto 5px; }
   </style>
 </head>
 <body>
+  {% if business.logo_data %}<img class="logo" src="data:{{ business.logo_mime or 'image/png' }};base64,{{ business.logo_data }}">{% endif %}
   <h1>{{ business.business_name or 'Mi negocio' }}</h1>
   <div class="center muted">
+    {% if business.slogan %}{{ business.slogan }}<br>{% endif %}
+    {% if business.receipt_header %}<strong>{{ business.receipt_header }}</strong><br>{% endif %}
+    {% if business.legal_name %}{{ business.legal_name }}<br>{% endif %}
     {% if business.owner_name %}{{ business.owner_name }}<br>{% endif %}
     {% if business.address %}{{ business.address }}<br>{% endif %}
     {% if business.phone %}Tel. {{ business.phone }}{% endif %}
     {% if business.whatsapp %} · WhatsApp {{ business.whatsapp }}{% endif %}
     {% if business.email %}<br>{{ business.email }}{% endif %}
     {% if business.tax_id %}<br>RFC: {{ business.tax_id }}{% endif %}
+    {% if business.tax_regime %}<br>{{ business.tax_regime }}{% endif %}
   </div>
   <div class="line"></div>
   <div class="center"><strong>{{ ticket_title }}</strong><br><span class="muted">Ticket #{{ ticket_number }} · {{ sale_date.strftime('%d/%m/%Y') }}</span></div>
@@ -30,7 +36,7 @@
   <table>
     <tr><th>ARTÍCULO</th><th class="amount">IMPORTE</th></tr>
     {% for item in items %}
-    <tr><td>{{ item.quantity }} × {{ item.name }}<br><span class="muted">$ {{ item.unit_price }} MXN c/u</span></td><td class="amount">$ {{ item.line_total }}</td></tr>
+    <tr><td>{{ item.quantity }} × {{ item.name }}<br><span class="muted">$ {{ item.unit_price }} MXN c/u</span></td><td class="amount">$ {{ item.line_total }} MXN</td></tr>
     {% endfor %}
   </table>
   <div class="line"></div>
@@ -43,6 +49,10 @@
   {% endif %}
   <table><tr><td><strong>TOTAL</strong></td><td class="amount total">$ {{ total }} MXN</td></tr></table>
   <div class="line"></div>
-  <p class="center muted">Gracias por su compra.<br>Emitido el {{ created_at.strftime('%d/%m/%Y %H:%M') }}</p>
+  <p class="center muted">
+    {{ business.receipt_footer or 'Gracias por su compra.' }}
+    {% if business.return_policy %}<br>{{ business.return_policy }}{% endif %}
+    <br>Emitido el {{ created_at.strftime('%d/%m/%Y %H:%M') }}
+  </p>
 </body>
 </html>

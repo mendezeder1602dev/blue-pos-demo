@@ -1,7 +1,7 @@
 from sqlalchemy.orm import declarative_base, relationship, backref
 from sqlalchemy import Column, ForeignKey
 from sqlalchemy import Integer, Boolean
-from sqlalchemy import String
+from sqlalchemy import String, Text
 from sqlalchemy import Date, DateTime
 from model.util.money_colum import MoneyColumn
 from model.util.monetary_types import CUPMoney
@@ -37,6 +37,10 @@ class Product(Base):
     barcode = Column(String(length=100), nullable=True, default='')
     is_temporary = Column(Boolean, nullable=False, default=False)
     image_path = Column(String(length=500), nullable=True, default='')
+    category = Column(String(length=80), nullable=True, default='General')
+    supplier = Column(String(length=120), nullable=True, default='')
+    minimum_stock = Column(Integer, nullable=False, default=5)
+    is_active = Column(Boolean, nullable=False, default=True, index=True)
 
     @property
     def profit(self):
@@ -70,6 +74,15 @@ class Sale(Base):
     payment_method = Column(String(length=50), nullable=False, default='cash')
     payment_details = Column(String(length=250), nullable=True, default='')
     transaction_id = Column(String(length=36), nullable=True, index=True)
+    created_at = Column(DateTime, nullable=False, default=datetime.now, index=True)
+    product_name = Column(String(length=80), nullable=True, default='')
+    cashier = Column(String(length=120), nullable=False, default='Vendedor')
+    status = Column(String(length=30), nullable=False, default='Completada', index=True)
+    reversal_reason = Column(String(length=300), nullable=True, default='')
+    reversed_at = Column(DateTime, nullable=True)
+    customer = Column(String(length=120), nullable=True, default='Público general')
+    # Las eliminaciones físicas sólo se reservan para mantenimiento/pruebas. La
+    # aplicación usa archivado lógico y nunca invoca este borrado sobre ventas reales.
     product = relationship('Product', backref=backref('sales', cascade='all,delete'))
 
     @property
@@ -125,6 +138,68 @@ class Expense(Base):
     description = Column(String(length=EXPENSE_DESCRIPTION_MAX_LENGTH), nullable=True, default='')
     spent_money = Column(MoneyColumn(), nullable=False, default=CUPMoney('-1.00'))
     date = Column(Date, nullable=False, default=date.today)
+    created_at = Column(DateTime, nullable=False, default=datetime.now)
+    is_active = Column(Boolean, nullable=False, default=True)
+
+
+class HeldSale(Base):
+    """Carrito suspendido que puede recuperarse sin afectar existencias."""
+    __tablename__ = 'held_sales'
+    id = Column(Integer, primary_key=True)
+    label = Column(String(length=120), nullable=False)
+    notes = Column(String(length=300), nullable=True, default='')
+    created_by = Column(String(length=120), nullable=False, default='Vendedor')
+    created_at = Column(DateTime, nullable=False, default=datetime.now)
+    items = relationship('HeldSaleItem', backref='held_sale', cascade='all,delete-orphan')
+
+
+class HeldSaleItem(Base):
+    __tablename__ = 'held_sale_items'
+    id = Column(Integer, primary_key=True)
+    held_sale_id = Column(Integer, ForeignKey('held_sales.id', ondelete='CASCADE'), nullable=False)
+    product_id = Column(Integer, ForeignKey('products.id', ondelete='RESTRICT'), nullable=False)
+    quantity = Column(Integer, nullable=False, default=1)
+    unit_price = Column(MoneyColumn(), nullable=False, default=CUPMoney('1.00'))
+
+
+class StockMovement(Base):
+    """Kardex: toda entrada, salida o ajuste de inventario queda registrado."""
+    __tablename__ = 'stock_movements'
+    id = Column(Integer, primary_key=True)
+    product_id = Column(Integer, ForeignKey('products.id', ondelete='RESTRICT'), nullable=False, index=True)
+    movement_type = Column(String(length=30), nullable=False)
+    quantity = Column(Integer, nullable=False)
+    previous_stock = Column(Integer, nullable=False)
+    resulting_stock = Column(Integer, nullable=False)
+    reason = Column(String(length=300), nullable=False)
+    reference = Column(String(length=80), nullable=True, default='')
+    performed_by = Column(String(length=120), nullable=False, default='Administrador')
+    created_at = Column(DateTime, nullable=False, default=datetime.now, index=True)
+
+
+class AuditLog(Base):
+    """Bitácora operativa inmutable para acciones sensibles."""
+    __tablename__ = 'audit_logs'
+    id = Column(Integer, primary_key=True)
+    event_type = Column(String(length=50), nullable=False, index=True)
+    actor = Column(String(length=120), nullable=False)
+    entity_type = Column(String(length=50), nullable=False)
+    entity_id = Column(String(length=80), nullable=True, default='')
+    detail = Column(String(length=600), nullable=False)
+    created_at = Column(DateTime, nullable=False, default=datetime.now, index=True)
+
+
+class Customer(Base):
+    """Directorio comercial opcional; vender a público general sigue siendo válido."""
+    __tablename__ = 'customers'
+    id = Column(Integer, primary_key=True)
+    name = Column(String(length=120), nullable=False, unique=True)
+    phone = Column(String(length=40), nullable=True, default='')
+    email = Column(String(length=120), nullable=True, default='')
+    tax_id = Column(String(length=40), nullable=True, default='')
+    notes = Column(String(length=400), nullable=True, default='')
+    is_active = Column(Boolean, nullable=False, default=True)
+    created_at = Column(DateTime, nullable=False, default=datetime.now)
 
 
 class CashOpening(Base):
@@ -136,6 +211,8 @@ class CashOpening(Base):
     cash_limit = Column(MoneyColumn(), nullable=False, default=CUPMoney('3000.00'))
     opened_by = Column(String(length=120), nullable=False)
     notes = Column(String(length=400), nullable=True, default='')
+    denomination_details = Column(Text, nullable=True, default='{}')
+    source_close_id = Column(Integer, nullable=True)
     created_at = Column(DateTime, nullable=False, default=datetime.now)
 
 
@@ -172,6 +249,7 @@ class CashClose(Base):
     counted_cash = Column(MoneyColumn(), nullable=False, default=CUPMoney('0.00'))
     difference = Column(MoneyColumn(), nullable=False, default=CUPMoney('0.00'))
     notes = Column(String(length=600), nullable=True, default='')
+    denomination_details = Column(Text, nullable=True, default='{}')
     created_at = Column(DateTime, nullable=False, default=datetime.now)
 
 
@@ -187,6 +265,19 @@ class BusinessProfile(Base):
     tax_id = Column(String(length=60), nullable=True, default='')
     website = Column(String(length=180), nullable=True, default='')
     logo_path = Column(String(length=500), nullable=True, default='')
+    legal_name = Column(String(length=160), nullable=True, default='')
+    business_type = Column(String(length=80), nullable=True, default='Comercio minorista')
+    slogan = Column(String(length=180), nullable=True, default='')
+    city = Column(String(length=100), nullable=True, default='')
+    state = Column(String(length=100), nullable=True, default='')
+    postal_code = Column(String(length=12), nullable=True, default='')
+    tax_regime = Column(String(length=160), nullable=True, default='')
+    receipt_header = Column(String(length=300), nullable=True, default='')
+    receipt_footer = Column(String(length=500), nullable=True, default='Gracias por su compra.')
+    return_policy = Column(String(length=500), nullable=True, default='')
+    brand_color = Column(String(length=7), nullable=True, default='#123B6D')
+    logo_data = Column(Text, nullable=True, default='')
+    logo_mime = Column(String(length=40), nullable=True, default='')
 
 
 class User(Base):

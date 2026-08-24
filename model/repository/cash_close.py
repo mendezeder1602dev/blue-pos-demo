@@ -38,3 +38,12 @@ class CashCloseRepository:
         return self.__session.scalars(
             select(CashClose).order_by(CashClose.date.desc(), CashClose.id.desc())
         ).all()
+
+    def get_latest_before(self, close_date):
+        """Devuelve el último cierre anterior a la fecha solicitada."""
+        return self.__session.scalar(
+            select(CashClose)
+            .where(CashClose.date < close_date)
+            .order_by(CashClose.date.desc(), CashClose.id.desc())
+            .limit(1)
+        )

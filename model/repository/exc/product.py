@@ -5,7 +5,7 @@ from model.entity.models import Product
 
 class UniqueProductNameException(Exception):
 
-    MSG = 'The product with name "{}" already exists.'
+    MSG = 'El producto "{}" ya está registrado en el inventario. Edita su existencia en lugar de crear otro.'
 
     def __init__(self, existing_name: str):
         self.__name = existing_name
@@ -16,9 +16,12 @@ class UniqueProductNameException(Exception):
 
 
 class UniqueProductBarcodeException(Exception):
-    def __init__(self, barcode: str):
+    def __init__(self, barcode: str, existing_name: str = ''):
         self.__barcode = barcode
-        super().__init__(f'El código de barras "{barcode}" ya está asignado a otro producto.')
+        detail = f' al producto "{existing_name}"' if existing_name else ' a otro producto'
+        super().__init__(
+            f'El código de barras "{barcode}" ya está asignado{detail}. '
+            'Busca y edita ese registro en lugar de duplicarlo.')
 
 
 class EmptyProductNameException(Exception):

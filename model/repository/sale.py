@@ -1,4 +1,4 @@
-from datetime import date
+from datetime import date, datetime
 from uuid import uuid4
 
 from sqlalchemy import update, select, delete, cast, Numeric, asc, desc, Float, func
@@ -103,18 +103,30 @@ class SaleRepository(RepositoryObserver):
         if not entries:
             raise ValueError('A transaction must contain at least one product.')
         transaction_id = uuid4().hex
+        requested_by_product = {}
         for sale, quantity in entries:
             self.__check_quantity_is_positive(quantity)
             self.__check_price_is_positive(sale)
             self.__check_cost_is_not_negative(sale)
             self.__check_product_exists(sale)
-            self.__check_there_are_enough_products(sale, quantity)
+            requested_by_product[sale.product_id] = requested_by_product.get(sale.product_id, 0) + quantity
+        for product_id, quantity in requested_by_product.items():
+            product = self.__get_product_by_id(product_id)
+            if product.quantity < quantity:
+                raise NoEnoughProductQuantityException(product.quantity)
         inserted_sales = []
         try:
             for sale, quantity in entries:
                 sale.transaction_id = transaction_id
                 inserted_sales.extend(self.__execute_insertion_and_return_sales(sale, quantity))
-                self.__execute_product_quantity_update(sale, quantity)
+                result = self.__session.execute(
+                    update(Product).where(
+                        Product.id == sale.product_id,
+                        Product.quantity >= quantity,
+                    ).values(quantity=Product.quantity - quantity)
+                )
+                if result.rowcount != 1:
+                    raise NoEnoughProductQuantityException(0)
             self.__session.commit()
         except Exception:
             self.__session.rollback()
@@ -160,6 +172,10 @@ class SaleRepository(RepositoryObserver):
                 payment_method=getattr(sale, 'payment_method', 'cash'),
                 payment_details=getattr(sale, 'payment_details', ''),
                 transaction_id=getattr(sale, 'transaction_id', None),
+                product_name=getattr(sale, 'product_name', ''),
+                cashier=getattr(sale, 'cashier', 'Vendedor'),
+                status=getattr(sale, 'status', 'Completada'),
+                customer=getattr(sale, 'customer', 'Público general'),
             )
             sales.append(a_sale)
         self.__session.add_all(sales)
@@ -195,6 +211,32 @@ class SaleRepository(RepositoryObserver):
         self.__execute_sale_deletion(sale_id_list)
         self.__session.commit()
         self._notify_on_data_changed_listeners()
+
+    def reverse_transaction(self, transaction_id: str, reason: str, actor: str):
+        """Anula una operación conservando evidencia y restaura existencias una sola vez."""
+        reason = (reason or '').strip()
+        if len(reason) < 5:
+            raise ValueError('Escribe un motivo de al menos 5 caracteres.')
+        sales = list(self.__session.scalars(
+            select(Sale).where(Sale.transaction_id == transaction_id)
+        ).all())
+        if not sales:
+            raise ValueError('La venta ya no existe.')
+        if any(sale.status == 'Anulada' for sale in sales):
+            raise ValueError('La venta ya fue anulada.')
+        restored = {}
+        for sale in sales:
+            restored[sale.product_id] = restored.get(sale.product_id, 0) + 1
+            sale.status = 'Anulada'
+            sale.reversal_reason = reason
+            sale.reversed_at = datetime.now()
+        for product_id, quantity in restored.items():
+            self.__session.execute(update(Product).where(Product.id == product_id).values(
+                quantity=Product.quantity + quantity
+            ))
+        self.__session.commit()
+        self._notify_on_data_changed_listeners()
+        return sales
 
     def __check_sales_exists(self, sale_id_list: list):
         found_ids = set(self.__session.scalars(
@@ -265,7 +307,7 @@ class SaleRepository(RepositoryObserver):
         )
 
     def get_all_sales(self) -> list:
-        return self.__session.scalars(select(Sale)).all()
+        return self.__session.scalars(select(Sale).where(Sale.status != 'Anulada')).all()
 
     def get_sales_by_filter(self, the_filter: SaleFilter) -> list:
         filter_query = SaleRepository.__create_filter_query(the_filter)
@@ -273,7 +315,7 @@ class SaleRepository(RepositoryObserver):
 
     @staticmethod
     def __create_filter_query(the_filter: SaleFilter):
-        query = select(Sale, )
+        query = select(Sale, ).where(Sale.status != 'Anulada')
 
         if the_filter.minimum_date is not None:
             query = query.where(Sale.date >= the_filter.minimum_date)

@@ -2,6 +2,9 @@ import sqlite3
 from contextlib import closing
 from pathlib import Path
 import shutil
+import os
+import tempfile
+from sqlalchemy.engine import make_url
 
 
 def backup_database(database_path: str, backup_path: str):
@@ -17,3 +20,19 @@ def restore_database(database_path: str, backup_path: str):
         raise FileNotFoundError(f'Backup database not found: {backup_database_path}')
     working_database_path.parent.mkdir(parents=True, exist_ok=True)
     shutil.copy2(backup_database_path.absolute(), working_database_path.absolute())
+
+
+def backup_database_bytes(database_url: str) -> bytes:
+    """Crea una copia consistente y descargable de una base SQLite activa."""
+    url = make_url(database_url)
+    if url.get_backend_name() != 'sqlite' or not url.database:
+        raise ValueError('La descarga directa sólo está disponible para SQLite.')
+    handle = tempfile.NamedTemporaryFile(suffix='.db', delete=False)
+    backup_path = handle.name
+    handle.close()
+    try:
+        backup_database(url.database, backup_path)
+        return Path(backup_path).read_bytes()
+    finally:
+        if os.path.exists(backup_path):
+            os.unlink(backup_path)

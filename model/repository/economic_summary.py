@@ -70,14 +70,16 @@ class EconomicSummaryRepository:
 
         query = select(acquired_money, total_cost, sale_quantity) \
             .where(Sale.date >= initial_date) \
-            .where(Sale.date <= final_date)
+            .where(Sale.date <= final_date) \
+            .where(Sale.status != 'Anulada')
         return query
 
     def __get_total_expense_row(self, initial_date: date, final_date: date):
         total_expense = func.sum(cast(Expense.spent_money, FLOAT)).label('total_expense')
         return self.__session.execute(select(total_expense)
                                       .where(Expense.date >= initial_date)
-                                      .where(Expense.date <= final_date)).first()
+                                      .where(Expense.date <= final_date)
+                                      .where(Expense.is_active == True)).first()
 
     def get_economic_summary_on_day(self, day_date: date) -> EconomicSummary:
         return self.__construct_economic_summary(day_date, day_date)
