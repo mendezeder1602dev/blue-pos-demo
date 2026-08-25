@@ -14,6 +14,7 @@ from model.repository.quote import QuoteRepository
 from model.repository.cash_close import CashCloseRepository
 from model.repository.cash_control import CashControlRepository
 from model.repository.operations import OperationsRepository
+from model.repository.catalog import CatalogRepository
 
 
 __BLUE_POS_FOLDER_PATH = Path(os.path.join(str(Path.home()), '.blue-pos/'))
@@ -48,6 +49,7 @@ class RepositoryFactory:
     __cash_close_repository = None
     __cash_control_repository = None
     __operations_repository = None
+    __catalog_repository = None
 
     @staticmethod
     def activate_workspace(url: str):
@@ -74,6 +76,7 @@ class RepositoryFactory:
         RepositoryFactory.__cash_close_repository = None
         RepositoryFactory.__cash_control_repository = None
         RepositoryFactory.__operations_repository = None
+        RepositoryFactory.__catalog_repository = None
 
     @staticmethod
     def workspace_url(workspace_key: str) -> str:
@@ -179,6 +182,13 @@ class RepositoryFactory:
         return RepositoryFactory.__operations_repository
 
     @staticmethod
+    def get_catalog_repository(url: str = None):
+        RepositoryFactory.__create_session_if_necessary(url)
+        if RepositoryFactory.__catalog_repository is None:
+            RepositoryFactory.__catalog_repository = CatalogRepository(RepositoryFactory.__session)
+        return RepositoryFactory.__catalog_repository
+
+    @staticmethod
     def active_database_url():
         return RepositoryFactory.__url or DB_URL
 
@@ -225,6 +235,7 @@ class RepositoryFactory:
         RepositoryFactory.__cash_close_repository = None
         RepositoryFactory.__cash_control_repository = None
         RepositoryFactory.__operations_repository = None
+        RepositoryFactory.__catalog_repository = None
         RepositoryFactory.__auth_session = None
         RepositoryFactory.__auth_engine = None
         RepositoryFactory.__auth_user_repository = None

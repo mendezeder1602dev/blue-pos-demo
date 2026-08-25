@@ -1,8 +1,48 @@
 """Creación y migración de esquema, compartida entre la app de escritorio y la web."""
+from datetime import datetime
+
 from sqlalchemy import create_engine, inspect, text
 
 from model.entity.models import AuthSession, Base, User
 from model.repository.factory import DB_URL, RepositoryFactory
+
+
+DEMO_CLEANUP_MIGRATION = 'clean_demo_2026_08_24_v1'
+
+
+def _clean_demo_operational_data_once(engine):
+    """Limpia datos de prueba una sola vez sin eliminar accesos ni perfil comercial."""
+    operational_tables = (
+        'held_sale_items', 'held_sales', 'quote_items', 'quotes', 'stock_movements',
+        'audit_logs', 'cash_movements', 'cash_closes', 'cash_openings', 'expenses',
+        'sales', 'products', 'customers', 'catalog_settings',
+    )
+    existing_tables = set(inspect(engine).get_table_names())
+    with engine.begin() as connection:
+        connection.execute(text(
+            'CREATE TABLE IF NOT EXISTS deployment_migrations ('
+            'migration_key VARCHAR(100) PRIMARY KEY, applied_at VARCHAR(40) NOT NULL)'))
+        already_applied = connection.execute(
+            text('SELECT migration_key FROM deployment_migrations WHERE migration_key = :key'),
+            {'key': DEMO_CLEANUP_MIGRATION}).first()
+        if already_applied:
+            return False
+
+        for table_name in operational_tables:
+            if table_name in existing_tables:
+                connection.execute(text(f'DELETE FROM {table_name}'))
+
+        if engine.dialect.name == 'sqlite' and 'sqlite_sequence' in existing_tables:
+            for table_name in operational_tables:
+                connection.execute(
+                    text('DELETE FROM sqlite_sequence WHERE name = :table_name'),
+                    {'table_name': table_name})
+
+        connection.execute(
+            text('INSERT INTO deployment_migrations (migration_key, applied_at) '
+                 'VALUES (:key, :applied_at)'),
+            {'key': DEMO_CLEANUP_MIGRATION, 'applied_at': datetime.utcnow().isoformat()})
+    return True
 
 
 def create_database(database_url=DB_URL):
@@ -25,6 +65,11 @@ def create_database(database_url=DB_URL):
             'is_temporary': 'BOOLEAN DEFAULT 0', 'category': "VARCHAR(80) DEFAULT 'General'",
             'supplier': "VARCHAR(120) DEFAULT ''", 'minimum_stock': 'INTEGER DEFAULT 5',
             'is_active': 'BOOLEAN DEFAULT 1',
+            'catalog_visible': 'BOOLEAN DEFAULT 0',
+            'catalog_featured': 'BOOLEAN DEFAULT 0',
+            'catalog_description': "VARCHAR(500) DEFAULT ''",
+            'catalog_image_data': "TEXT DEFAULT ''",
+            'catalog_image_mime': "VARCHAR(40) DEFAULT ''",
         })
         connection.execute(text("CREATE UNIQUE INDEX IF NOT EXISTS idx_products_barcode ON products(barcode) WHERE barcode <> ''"))
         add_columns(connection, 'business_profile', {
@@ -66,6 +111,7 @@ def create_database(database_url=DB_URL):
         add_columns(connection, 'cash_closes', {
             'denomination_details': "TEXT DEFAULT '{}'",
         })
+    _clean_demo_operational_data_once(engine)
 
 
 def create_auth_database():

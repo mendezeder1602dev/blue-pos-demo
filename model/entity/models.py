@@ -41,6 +41,11 @@ class Product(Base):
     supplier = Column(String(length=120), nullable=True, default='')
     minimum_stock = Column(Integer, nullable=False, default=5)
     is_active = Column(Boolean, nullable=False, default=True, index=True)
+    catalog_visible = Column(Boolean, nullable=False, default=False, index=True)
+    catalog_featured = Column(Boolean, nullable=False, default=False)
+    catalog_description = Column(String(length=500), nullable=True, default='')
+    catalog_image_data = Column(Text, nullable=True, default='')
+    catalog_image_mime = Column(String(length=40), nullable=True, default='')
 
     @property
     def profit(self):
@@ -278,6 +283,20 @@ class BusinessProfile(Base):
     brand_color = Column(String(length=7), nullable=True, default='#123B6D')
     logo_data = Column(Text, nullable=True, default='')
     logo_mime = Column(String(length=40), nullable=True, default='')
+
+
+class CatalogSettings(Base):
+    """Configuración pública del micrositio; nunca contiene datos financieros."""
+    __tablename__ = 'catalog_settings'
+    id = Column(Integer, primary_key=True)
+    slug = Column(String(length=80), nullable=False, unique=True, index=True, default='mi-negocio')
+    is_published = Column(Boolean, nullable=False, default=False)
+    headline = Column(String(length=180), nullable=True, default='')
+    about = Column(String(length=800), nullable=True, default='')
+    whatsapp = Column(String(length=40), nullable=True, default='')
+    business_hours = Column(String(length=300), nullable=True, default='')
+    service_message = Column(String(length=300), nullable=True, default='')
+    show_out_of_stock = Column(Boolean, nullable=False, default=True)
 
 
 class User(Base):

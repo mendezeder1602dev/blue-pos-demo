@@ -10,14 +10,19 @@ import base64
 import json
 import os
 import sys
+import re
 from datetime import date, datetime, timedelta
 from html import escape
 from types import SimpleNamespace
+from urllib.parse import quote
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import pandas as pd
 import streamlit as st
+from reportlab.graphics import renderSVG
+from reportlab.graphics.barcode.qr import QrCodeWidget
+from reportlab.graphics.shapes import Drawing
 
 # Los secretos de Streamlit deben exponerse antes de importar la fábrica de datos.
 try:
@@ -29,6 +34,7 @@ except FileNotFoundError:
 
 from model import economy, schema
 from model.help_assistant import find_answer, topics_for_role
+from model.repository.catalog import normalize_catalog_slug
 from model.database_utilities import backup_database_bytes
 from model.entity.models import CashClose, CashMovement, CashOpening, Expense, Product, Quote, QuoteItem, Sale
 from model.repository.expense import ExpenseFilter
@@ -60,6 +66,7 @@ CASH_DENOMINATIONS = (
     ('coin_1', 'Moneda mexicana · 1 MXN', 1.0),
     ('coin_050', 'Moneda mexicana · 0.50 MXN', .5),
 )
+WORKSPACE_SCHEMA_VERSION = 3
 
 
 def _mxn(value):
@@ -428,6 +435,7 @@ def _render_login():
 def _log_in(user, persist=True):
     schema.activate_user_workspace(user)
     st.session_state['_workspace_schema_ready'] = True
+    st.session_state['_workspace_schema_version'] = WORKSPACE_SCHEMA_VERSION
     st.session_state['user'] = user
     st.session_state['page'] = 'Tablero'
     if persist and getattr(user, 'id', None) is not None:
@@ -1106,7 +1114,7 @@ def _render_inventory():
     } for p in products]), width='stretch', hide_index=True)
     _render_inventory_downloads(products, 'admin', include_cost=True)
 
-    with st.expander('Editar o eliminar producto'):
+    with st.expander('Editar o dar de baja un producto'):
         names = [p.name for p in products]
         selected_name = st.selectbox('Selecciona un producto', names, key='inventory_edit_select')
         product = next(p for p in products if p.name == selected_name)
@@ -1143,12 +1151,31 @@ def _render_inventory():
                 st.warning(str(error), icon=':material/content_copy:')
             except Exception as error:
                 st.error(str(error), icon=':material/error:')
-        if st.button('Archivar producto', key=f'delete_product_{product.id}'):
-            RepositoryFactory.get_product_repository().archive_product(product)
-            RepositoryFactory.get_operations_repository().audit(
-                'producto_archivado', _actor_name(), 'product', product.id, product.name)
-            st.success(f'Producto "{product.name}" archivado; su historial se conserva.')
-            st.rerun()
+        st.divider()
+        st.markdown('#### Dar de baja del inventario')
+        st.warning(
+            f'Esta acción quitará **{product.name}** de ventas, inventario y catálogo público. '
+            'Sus tickets, movimientos y reportes anteriores se conservarán para mantener la '
+            'auditoría del negocio.',
+            icon=':material/warning:')
+        confirm_removal = st.checkbox(
+            f'Confirmo que deseo dar de baja “{product.name}”',
+            key=f'confirm_delete_product_{product.id}')
+        if st.button(
+                'Eliminar del inventario', key=f'delete_product_{product.id}',
+                type='primary', icon=':material/delete:', disabled=not confirm_removal):
+            try:
+                RepositoryFactory.get_product_repository().archive_product(product)
+                RepositoryFactory.get_operations_repository().audit(
+                    'producto_archivado', _actor_name(), 'product', product.id,
+                    f'{product.name} · baja segura; historial conservado')
+                st.toast(
+                    f'“{product.name}” fue eliminado del inventario activo.',
+                    icon=':material/check_circle:')
+                st.rerun()
+            except Exception as error:
+                st.error(f'No fue posible dar de baja el producto: {error}',
+                         icon=':material/error:')
 
     with st.expander('Entrada, merma o ajuste de existencias', icon=':material/inventory:'):
         selected_stock_name = st.selectbox(
@@ -1673,13 +1700,15 @@ def _summary_for_range(initial_date: date, final_date: date):
 
     acquired_money = economy.calculate_collected_money(sales)
     total_profit = economy.calculate_total_profit(sales)
+    total_cost = acquired_money - total_profit
     total_expense = CUPMoney('0')
     for an_expense in expenses:
         total_expense += an_expense.spent_money
     return {
         'sale_quantity': len({sale.transaction_id or f'legacy-{sale.id}' for sale in sales}),
         'unit_quantity': len(sales), 'acquired_money': acquired_money,
-        'total_profit': total_profit, 'total_expense': total_expense,
+        'total_cost': total_cost, 'total_profit': total_profit,
+        'total_expense': total_expense,
         'net_profit': total_profit - total_expense, 'sales': sales, 'expenses': expenses,
     }
 
@@ -2259,11 +2288,12 @@ def _render_reports():
     st.caption(f'Del {initial_date} al {final_date}')
     report_primary = st.columns(3)
     report_primary[0].metric('Tickets', str(result['sale_quantity']))
-    report_primary[1].metric('Ingresos', _mxn(result['acquired_money'].amount))
-    report_primary[2].metric('Ganancia bruta', _mxn(result['total_profit'].amount))
-    report_secondary = st.columns(2)
-    report_secondary[0].metric('Gastos', _mxn(result['total_expense'].amount))
-    report_secondary[1].metric('Utilidad neta', _mxn(result['net_profit'].amount))
+    report_primary[1].metric('Ventas brutas', _mxn(result['acquired_money'].amount))
+    report_primary[2].metric('Costo de mercancía vendida', _mxn(result['total_cost'].amount))
+    report_secondary = st.columns(3)
+    report_secondary[0].metric('Utilidad bruta', _mxn(result['total_profit'].amount))
+    report_secondary[1].metric('Gastos operativos', _mxn(result['total_expense'].amount))
+    report_secondary[2].metric('Utilidad neta · ganancia real', _mxn(result['net_profit'].amount))
     units_label = 'unidad vendida' if result['unit_quantity'] == 1 else 'unidades vendidas'
     operations_label = 'operación' if result['sale_quantity'] == 1 else 'operaciones'
     st.caption(
@@ -2289,10 +2319,11 @@ def _render_reports():
         'Periodo': f'{initial_date} al {final_date}',
         'Tickets': result['sale_quantity'],
         'Unidades vendidas': result['unit_quantity'],
-        'Ingresos': float(result['acquired_money'].amount),
-        'Ganancia bruta': float(result['total_profit'].amount),
-        'Gastos': float(result['total_expense'].amount),
-        'Ganancia neta': float(result['net_profit'].amount),
+        'Ventas brutas': float(result['acquired_money'].amount),
+        'Costo de mercancía vendida': float(result['total_cost'].amount),
+        'Utilidad bruta': float(result['total_profit'].amount),
+        'Gastos operativos': float(result['total_expense'].amount),
+        'Utilidad neta / ganancia real': float(result['net_profit'].amount),
     }]
     report_sections = [
         ('Resumen', summary_rows),
@@ -2377,12 +2408,11 @@ def _render_statistics():
         for day_number in range(1, final_date.day + 1):
             current_day = date(selected_year, selected_month, day_number)
             day_result = _summary_for_range(current_day, current_day)
-            day_net = float(day_result['net_profit'].amount)
-            day_difference = cash_difference_between(current_day, current_day)
             trend_rows.append({
                 'Periodo': f'{day_number:02d}',
-                'Ganancia bruta': float(day_result['total_profit'].amount),
-                'Ganancia neta': day_net, 'Ganancia real': day_net + day_difference,
+                'Ventas brutas': float(day_result['acquired_money'].amount),
+                'Utilidad bruta': float(day_result['total_profit'].amount),
+                'Utilidad neta': float(day_result['net_profit'].amount),
                 'Tickets': day_result['sale_quantity'], 'Unidades': day_result['unit_quantity'],
             })
     else:
@@ -2396,40 +2426,45 @@ def _render_statistics():
             month_final = date(selected_year, month_number,
                                calendar.monthrange(selected_year, month_number)[1])
             month_result = _summary_for_range(month_initial, month_final)
-            month_net = float(month_result['net_profit'].amount)
-            month_difference = cash_difference_between(month_initial, month_final)
             trend_rows.append({
                 'Periodo': MONTH_NAMES[month_number][:3],
-                'Ganancia bruta': float(month_result['total_profit'].amount),
-                'Ganancia neta': month_net, 'Ganancia real': month_net + month_difference,
+                'Ventas brutas': float(month_result['acquired_money'].amount),
+                'Utilidad bruta': float(month_result['total_profit'].amount),
+                'Utilidad neta': float(month_result['net_profit'].amount),
                 'Tickets': month_result['sale_quantity'], 'Unidades': month_result['unit_quantity'],
             })
 
     result = _summary_for_range(initial_date, final_date)
+    gross_sales = float(result['acquired_money'].amount)
+    cost_of_goods = float(result['total_cost'].amount)
     gross_profit = float(result['total_profit'].amount)
     expenses = float(result['total_expense'].amount)
     net_profit = float(result['net_profit'].amount)
     cash_difference = cash_difference_between(initial_date, final_date)
-    real_profit = net_profit + cash_difference
 
     st.caption(f'Resultados de {period_label} · {initial_date} al {final_date}')
     main_metrics = st.columns(3)
-    main_metrics[0].metric('Ingresos', _mxn(result['acquired_money'].amount))
-    main_metrics[1].metric('Ganancia neta', _mxn(net_profit))
-    main_metrics[2].metric('Ganancia real', _mxn(real_profit),
-                           delta=f'Ajuste de caja {_mxn(cash_difference)}',
-                           delta_color='normal' if cash_difference >= 0 else 'inverse')
+    main_metrics[0].metric('Ventas brutas', _mxn(gross_sales))
+    main_metrics[1].metric('Costo de mercancía vendida', _mxn(cost_of_goods))
+    main_metrics[2].metric('Utilidad bruta', _mxn(gross_profit))
     detail_metrics = st.columns(3)
-    detail_metrics[0].metric('Ganancia bruta', _mxn(gross_profit))
-    detail_metrics[1].metric('Gastos', _mxn(expenses))
-    detail_metrics[2].metric('Tickets / unidades',
-                             f'{result["sale_quantity"]} / {result["unit_quantity"]}')
+    detail_metrics[0].metric('Gastos operativos', _mxn(expenses))
+    detail_metrics[1].metric('Utilidad neta · ganancia real', _mxn(net_profit))
+    detail_metrics[2].metric('Diferencia de caja', _mxn(cash_difference),
+                             delta='Sobrante' if cash_difference > 0 else
+                             'Faltante' if cash_difference < 0 else 'Caja conciliada',
+                             delta_color='normal' if cash_difference >= 0 else 'inverse')
+    st.caption(f'Actividad del periodo: {result["sale_quantity"]} tickets · '
+               f'{result["unit_quantity"]} unidades vendidas.')
 
     with st.expander('Cómo se calculan las ganancias', icon=':material/calculate:'):
         st.markdown(
-            '- **Ganancia bruta:** ingresos menos costo de los productos vendidos.\n'
-            '- **Ganancia neta:** ganancia bruta menos gastos registrados.\n'
-            '- **Ganancia real:** ganancia neta más sobrantes o menos faltantes de cortes de caja.')
+            '- **Ventas brutas:** total cobrado por las ventas, antes de descontar costos o gastos.\n'
+            '- **Costo de mercancía vendida:** lo que costaron los productos que se vendieron.\n'
+            '- **Utilidad bruta:** ventas brutas menos costo de mercancía vendida.\n'
+            '- **Utilidad neta o ganancia real:** utilidad bruta menos gastos operativos.\n'
+            '- **Diferencia de caja:** sobrante o faltante del arqueo; se muestra por separado '
+            'porque no representa una ganancia comercial.')
 
     if period == 'Día':
         payment_totals = {'Efectivo': 0.0, 'Tarjeta': 0.0, 'Transferencia': 0.0, 'Otros': 0.0}
@@ -2447,7 +2482,7 @@ def _render_statistics():
         trend_dataframe = pd.DataFrame(trend_rows).set_index('Periodo')
         st.subheader('Evolución de rentabilidad')
         st.line_chart(trend_dataframe[
-            ['Ganancia bruta', 'Ganancia neta', 'Ganancia real']])
+            ['Ventas brutas', 'Utilidad bruta', 'Utilidad neta']])
         st.subheader('Actividad comercial')
         st.bar_chart(trend_dataframe[['Tickets', 'Unidades']])
 
@@ -2742,6 +2777,312 @@ def _render_business_profile():
         st.rerun()
 
 
+def _public_catalog_url(slug):
+    configured = os.environ.get('BLUE_POS_PUBLIC_URL', '').strip().rstrip('/')
+    if configured:
+        base_url = configured
+    else:
+        headers = st.context.headers
+        host = headers.get('Host', 'localhost:8501')
+        if not re.fullmatch(r'[A-Za-z0-9.-]+(?::\d+)?', host):
+            host = 'localhost:8501'
+        protocol = headers.get('X-Forwarded-Proto', 'http' if host.startswith('localhost') else 'https')
+        base_url = f'{protocol}://{host}'
+    return f'{base_url}/?catalogo={normalize_catalog_slug(slug)}'
+
+
+def _catalog_whatsapp_url(number, product_name=None):
+    digits = re.sub(r'\D', '', number or '')
+    if not digits:
+        return ''
+    if len(digits) == 10:
+        digits = '52' + digits
+    message = ('Hola, vi su catálogo en Blue POS y quisiera más información.' if not product_name else
+               f'Hola, vi “{product_name}” en su catálogo y quisiera confirmar disponibilidad.')
+    return f'https://wa.me/{digits}?text={quote(message)}'
+
+
+def _catalog_qr_svg(url):
+    widget = QrCodeWidget(url)
+    x0, y0, x1, y1 = widget.getBounds()
+    size = 180
+    drawing = Drawing(size, size, transform=[
+        size / (x1 - x0), 0, 0, size / (y1 - y0), 0, 0])
+    drawing.add(widget)
+    return renderSVG.drawToString(drawing)
+
+
+def _render_catalog_storefront(settings, profile, products, preview=False):
+    """Escaparate público de solo lectura; nunca expone costo ni stock exacto."""
+    accent = profile.brand_color if re.fullmatch(r'#[0-9A-Fa-f]{6}', profile.brand_color or '') else '#123B6D'
+    st.markdown(f'''<style>
+      .catalog-hero {{background:linear-gradient(135deg,{accent},#08111f);color:white;
+        border-radius:22px;padding:34px 38px;margin-bottom:22px;}}
+      .catalog-hero h1 {{color:white!important;margin:0 0 8px;font-size:clamp(2rem,5vw,3.5rem);}}
+      .catalog-hero p {{color:#edf4ff!important;font-size:1.08rem;max-width:760px;}}
+      .catalog-brand {{font-weight:800;letter-spacing:.12em;font-size:.76rem;opacity:.85;}}
+      [data-testid="stImage"] img {{border-radius:14px;object-fit:cover;}}
+    </style>''', unsafe_allow_html=True)
+    header_columns = st.columns((1, 4), vertical_alignment='center')
+    with header_columns[0]:
+        if profile.logo_data:
+            try:
+                st.image(base64.b64decode(profile.logo_data), width=110)
+            except (ValueError, TypeError):
+                st.markdown(':material/storefront:')
+    with header_columns[1]:
+        st.markdown(f'''<section class="catalog-hero">
+          <div class="catalog-brand">CATÁLOGO OFICIAL</div>
+          <h1>{escape(profile.business_name or 'Nuestro catálogo')}</h1>
+          <p>{escape(settings.headline or profile.slogan or 'Productos seleccionados para ti.')}</p>
+        </section>''', unsafe_allow_html=True)
+
+    if settings.about:
+        st.markdown(f'### Conoce nuestro negocio\n{settings.about}')
+    contact = settings.whatsapp or profile.whatsapp or profile.phone
+    with st.container(horizontal=True, vertical_alignment='center'):
+        if contact:
+            st.link_button('Hablar por WhatsApp', _catalog_whatsapp_url(contact),
+                           icon=':material/chat:', type='primary')
+        if profile.address:
+            st.caption(f':material/location_on: {profile.address}')
+        if settings.business_hours:
+            st.caption(f':material/schedule: {settings.business_hours}')
+    if settings.service_message:
+        st.info(settings.service_message, icon=':material/local_shipping:')
+
+    visible_products = [product for product in products
+                        if settings.show_out_of_stock or product.quantity > 0]
+    st.markdown('## Explora nuestros productos')
+    if not visible_products:
+        st.info('Estamos preparando nuestro catálogo. Vuelve pronto.', icon=':material/inventory_2:')
+    else:
+        controls = st.columns((2, 1))
+        search = controls[0].text_input(
+            'Buscar productos', placeholder='¿Qué estás buscando?',
+            icon=':material/search:', key=f'catalog_search_{"preview" if preview else "public"}')
+        categories = ('Todas', *sorted({product.category or 'General' for product in visible_products}))
+        category = controls[1].selectbox(
+            'Categoría', categories, key=f'catalog_category_{"preview" if preview else "public"}')
+        normalized_search = search.strip().casefold()
+        filtered = [product for product in visible_products
+                    if (category == 'Todas' or (product.category or 'General') == category)
+                    and (not normalized_search or normalized_search in product.name.casefold()
+                         or normalized_search in (product.catalog_description or product.description or '').casefold())]
+        if not filtered:
+            st.warning('No encontramos productos con esos filtros.', icon=':material/search_off:')
+        for row_start in range(0, len(filtered), 3):
+            columns = st.columns(3)
+            for column, product in zip(columns, filtered[row_start:row_start + 3]):
+                with column.container(border=True, height='stretch'):
+                    if product.catalog_image_data:
+                        try:
+                            st.image(base64.b64decode(product.catalog_image_data), width='stretch')
+                        except (ValueError, TypeError):
+                            st.markdown('### :material/inventory_2:')
+                    else:
+                        st.markdown('### :material/inventory_2:')
+                        st.caption('Imagen próximamente')
+                    if product.catalog_featured:
+                        st.badge('Destacado', icon=':material/star:', color='blue')
+                    st.markdown(f'### {escape(product.name)}')
+                    st.write(product.catalog_description or product.description or 'Consulta detalles con nosotros.')
+                    st.markdown(f'## {_mxn(product.price.amount)}')
+                    if product.quantity <= 0:
+                        st.badge('Agotado', icon=':material/block:', color='red')
+                    elif product.quantity <= (product.minimum_stock or 0):
+                        st.badge('Pocas unidades', icon=':material/bolt:', color='orange')
+                    else:
+                        st.badge('Disponible', icon=':material/check_circle:', color='green')
+                    whatsapp_url = _catalog_whatsapp_url(contact, product.name)
+                    if whatsapp_url and product.quantity > 0:
+                        st.link_button('Consultar por WhatsApp', whatsapp_url,
+                                       icon=':material/chat:', width='stretch')
+    st.caption(f'© {date.today().year} {profile.business_name or "Negocio"} · Catálogo impulsado por Blue POS y Grupo ECCOS')
+
+
+def _render_public_catalog(slug):
+    workspace_url = RepositoryFactory.workspace_url('primary')
+    RepositoryFactory.activate_workspace(workspace_url)
+    schema.create_database(workspace_url)
+    catalog_repository = RepositoryFactory.get_catalog_repository()
+    settings = catalog_repository.get_published_by_slug(slug)
+    if settings is None:
+        st.error('Este catálogo no está disponible.', icon=':material/storefront:')
+        st.caption('Verifica el enlace o solicita al negocio que active su catálogo.')
+        return
+    profile = RepositoryFactory.get_business_profile_repository().get_profile()
+    _render_catalog_storefront(
+        settings, profile, catalog_repository.get_catalog_products(), preview=False)
+
+
+def _render_catalog_manager():
+    _hero('Mi página web',
+          'Convierte tu inventario en un catálogo profesional para compartir con clientes.',
+          'CATÁLOGO DIGITAL · VENTA POR WHATSAPP')
+    catalog_repository = RepositoryFactory.get_catalog_repository()
+    profile = RepositoryFactory.get_business_profile_repository().get_profile()
+    products = [product for product in RepositoryFactory.get_product_repository().get_all_products()
+                if not product.is_temporary]
+    settings = catalog_repository.get_settings()
+    published_products = [product for product in products if product.catalog_visible]
+    contact = settings.whatsapp or profile.whatsapp or profile.phone
+    requirements = {
+        'Identidad del negocio': bool((profile.business_name or '').strip()),
+        'Descripción o eslogan': bool((settings.headline or profile.slogan or '').strip()),
+        'WhatsApp o teléfono': bool((contact or '').strip()),
+        'Producto publicado': bool(published_products),
+    }
+    completion = round(sum(requirements.values()) / len(requirements) * 100)
+
+    status_columns = st.columns((2, 1, 1))
+    status_columns[0].progress(completion / 100, text=f'Preparación del catálogo · {completion}%')
+    status_columns[1].metric('Productos públicos', len(published_products))
+    status_columns[2].metric('Estado', 'Publicado' if settings.is_published else 'Borrador')
+    missing = [label for label, complete in requirements.items() if not complete]
+    if missing:
+        st.warning('Para publicar completa: ' + ', '.join(missing) + '.', icon=':material/checklist:')
+
+    configuration_tab, products_tab, preview_tab = st.tabs(
+        ('1. Configuración', '2. Productos', '3. Vista previa'))
+    with configuration_tab:
+        with st.form('catalog_settings_form', enter_to_submit=False):
+            st.subheader('Identidad y contacto')
+            slug = st.text_input(
+                'Dirección de tu catálogo', value=settings.slug or 'mi-negocio',
+                help='Usa letras minúsculas, números y guiones. Ejemplo: papeleria-eder.')
+            headline = st.text_input(
+                'Mensaje principal', value=settings.headline or profile.slogan or '',
+                placeholder='Todo lo que necesitas, cerca de ti')
+            about = st.text_area(
+                'Acerca del negocio', value=settings.about or '', height=110,
+                placeholder='Cuenta qué te hace diferente y por qué deberían elegirte.')
+            whatsapp = st.text_input(
+                'WhatsApp comercial', value=settings.whatsapp or profile.whatsapp or '',
+                placeholder='Ejemplo: 5215551234567',
+                help='Incluye lada y código de país para que el botón funcione fuera de México.')
+            contact_columns = st.columns(2)
+            business_hours = contact_columns[0].text_area(
+                'Horarios', value=settings.business_hours or '', height=90,
+                placeholder='Lun–Vie 9:00–18:00 · Sáb 9:00–14:00')
+            service_message = contact_columns[1].text_area(
+                'Entrega o atención', value=settings.service_message or '', height=90,
+                placeholder='Recoge en tienda o consulta entregas disponibles.')
+            show_out_of_stock = st.toggle(
+                'Mostrar productos agotados', value=settings.show_out_of_stock,
+                help='Se mostrarán como agotados, sin botón de consulta.')
+            publish_requested = st.toggle(
+                'Publicar catálogo', value=settings.is_published,
+                help='Al activarlo, cualquier persona con el enlace podrá verlo.')
+            save_settings = st.form_submit_button(
+                'Guardar y aplicar', type='primary', icon=':material/publish:')
+        if save_settings:
+            clean_slug = normalize_catalog_slug(slug)
+            can_publish = (bool((profile.business_name or '').strip()) and
+                           bool((headline or profile.slogan or '').strip()) and
+                           bool((whatsapp or profile.phone or '').strip()) and
+                           bool([product for product in products if product.catalog_visible]))
+            catalog_repository.save_settings({
+                'slug': clean_slug, 'headline': headline.strip(), 'about': about.strip(),
+                'whatsapp': whatsapp.strip(), 'business_hours': business_hours.strip(),
+                'service_message': service_message.strip(),
+                'show_out_of_stock': bool(show_out_of_stock),
+                'is_published': bool(publish_requested and can_publish),
+            })
+            if publish_requested and not can_publish:
+                st.warning('Guardamos el borrador, pero falta completar los requisitos para publicarlo.')
+            else:
+                RepositoryFactory.get_operations_repository().audit(
+                    'catalogo_actualizado', _actor_name(), 'catalog', '', clean_slug)
+                st.toast('Catálogo actualizado.', icon=':material/check_circle:')
+            st.rerun()
+        if settings.slug:
+            public_url = _public_catalog_url(settings.slug)
+            st.text_input('Enlace para compartir', value=public_url, disabled=True)
+            if settings.is_published:
+                st.link_button('Abrir página pública', public_url,
+                               icon=':material/open_in_new:', type='primary')
+                with st.expander('Código QR para clientes', icon=':material/qr_code_2:'):
+                    qr_svg = _catalog_qr_svg(public_url)
+                    qr_columns = st.columns((1, 2), vertical_alignment='center')
+                    qr_columns[0].image(qr_svg, width=180)
+                    with qr_columns[1]:
+                        st.write('Colócalo en mostrador, tickets o redes sociales para abrir el catálogo.')
+                        st.download_button(
+                            'Descargar QR', qr_svg.encode('utf-8'),
+                            f'qr-catalogo-{settings.slug}.svg', 'image/svg+xml',
+                            icon=':material/download:')
+
+    with products_tab:
+        if not products:
+            st.info('Primero agrega productos desde Inventario.', icon=':material/inventory_2:')
+        else:
+            st.caption('Publica solamente productos con información clara. El costo, proveedor, código y cantidad exacta nunca serán visibles.')
+            editor = st.data_editor(
+                pd.DataFrame([{
+                    'ID': product.id, 'Publicar': bool(product.catalog_visible),
+                    'Destacado': bool(product.catalog_featured), 'Producto': product.name,
+                    'Descripción pública': product.catalog_description or product.description or '',
+                } for product in products]),
+                disabled=('ID', 'Producto'), hide_index=True, width='stretch',
+                column_config={
+                    'ID': st.column_config.NumberColumn(width='small'),
+                    'Publicar': st.column_config.CheckboxColumn(width='small'),
+                    'Destacado': st.column_config.CheckboxColumn(width='small'),
+                    'Descripción pública': st.column_config.TextColumn(max_chars=500, width='large'),
+                }, key='catalog_products_editor')
+            if st.button('Guardar selección de productos', type='primary',
+                         icon=':material/save:'):
+                for row in editor.to_dict('records'):
+                    catalog_repository.save_product_presentation(row['ID'], {
+                        'catalog_visible': bool(row['Publicar']),
+                        'catalog_featured': bool(row['Destacado']),
+                        'catalog_description': str(row['Descripción pública'] or '').strip(),
+                    })
+                st.toast('Productos del catálogo actualizados.', icon=':material/check_circle:')
+                st.rerun()
+            with st.expander('Fotografía de producto', icon=':material/add_photo_alternate:'):
+                selected_name = st.selectbox(
+                    'Producto', [product.name for product in products], key='catalog_photo_product')
+                selected_product = next(product for product in products if product.name == selected_name)
+                if selected_product.catalog_image_data:
+                    try:
+                        st.image(base64.b64decode(selected_product.catalog_image_data), width=240)
+                    except (ValueError, TypeError):
+                        pass
+                image_file = st.file_uploader(
+                    'Subir fotografía', type=('png', 'jpg', 'jpeg', 'webp'),
+                    key=f'catalog_photo_{selected_product.id}',
+                    help='Máximo 700 KB. Usa una foto cuadrada, limpia y bien iluminada.')
+                image_buttons = st.columns(2)
+                if image_buttons[0].button('Guardar fotografía', type='primary',
+                                           disabled=image_file is None):
+                    image_bytes = image_file.getvalue()
+                    if len(image_bytes) > 700 * 1024:
+                        st.error('La fotografía supera 700 KB. Comprímela antes de subirla.')
+                    else:
+                        catalog_repository.save_product_presentation(selected_product.id, {
+                            'catalog_image_data': base64.b64encode(image_bytes).decode('ascii'),
+                            'catalog_image_mime': image_file.type or 'image/jpeg',
+                        })
+                        st.toast('Fotografía guardada.', icon=':material/check_circle:')
+                        st.rerun()
+                if image_buttons[1].button('Quitar fotografía',
+                                           disabled=not bool(selected_product.catalog_image_data)):
+                    catalog_repository.save_product_presentation(selected_product.id, {
+                        'catalog_image_data': '', 'catalog_image_mime': '',
+                    })
+                    st.rerun()
+
+    with preview_tab:
+        preview_products = catalog_repository.get_catalog_products()
+        if not preview_products:
+            st.info('Selecciona al menos un producto para generar la vista previa.')
+        else:
+            st.caption('Así verán tu página los clientes. Los controles de búsqueda también funcionan aquí.')
+            _render_catalog_storefront(settings, profile, preview_products, preview=True)
+
+
 def _navigate_to_page(target):
     """Callback de navegación; se ejecuta antes de crear el widget del menú."""
     st.session_state['page'] = target
@@ -2823,7 +3164,8 @@ ADMIN_PAGES = {
     'Gastos': _render_expenses,
     'Clientes': _render_customers, 'Abastecimiento': _render_supply, 'Auditoría': _render_audit,
     'Reportes': _render_reports, 'Estadísticas': _render_statistics,
-    'Mi perfil': _render_business_profile, 'Asistente ECCOS': _render_help_assistant,
+    'Mi perfil': _render_business_profile, 'Mi página web': _render_catalog_manager,
+    'Asistente ECCOS': _render_help_assistant,
 }
 SELLER_PAGES = {
     'Nueva venta': _render_sales,
@@ -2838,9 +3180,10 @@ SELLER_PAGES = {
 
 def _render_app():
     user = st.session_state['user']
-    if not st.session_state.get('_workspace_schema_ready'):
+    if st.session_state.get('_workspace_schema_version') != WORKSPACE_SCHEMA_VERSION:
         schema.activate_user_workspace(user)
         st.session_state['_workspace_schema_ready'] = True
+        st.session_state['_workspace_schema_version'] = WORKSPACE_SCHEMA_VERSION
     pages = ADMIN_PAGES if _is_administrator() else SELLER_PAGES
     business_profile = RepositoryFactory.get_business_profile_repository().get_profile()
     brand_color = (business_profile.brand_color or '#123B6D')
@@ -2876,6 +3219,10 @@ def _render_app():
 
 
 def main():
+    catalog_slug = st.query_params.get('catalogo')
+    if catalog_slug:
+        _render_public_catalog(catalog_slug)
+        return
     _bootstrap_auth()
     if 'user' not in st.session_state:
         token = st.query_params.get('session')
@@ -2885,6 +3232,7 @@ def main():
             if user is not None:
                 schema.activate_user_workspace(user)
                 st.session_state['_workspace_schema_ready'] = True
+                st.session_state['_workspace_schema_version'] = WORKSPACE_SCHEMA_VERSION
                 st.session_state['user'] = user
                 st.session_state['page'] = 'Tablero'
             else:
