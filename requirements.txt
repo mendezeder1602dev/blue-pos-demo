@@ -9,3 +9,5 @@ easy-mvp==0.2.0
 pyqtgraph==0.12.4
 streamlit==1.62.0
 psycopg2-binary>=2.9,<3
+
+# Revisión de despliegue 2026-08-24: reconstrucción limpia tras ampliar el esquema del catálogo.
