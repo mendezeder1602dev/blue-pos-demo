@@ -1,9 +1,52 @@
 import re
 import unicodedata
 
-from sqlalchemy import select
+from sqlalchemy import Boolean, Column, Integer, String, Text, select
 
-from model.entity.models import CatalogSettings, Product
+from model.entity import models as entity_models
+
+
+Product = entity_models.Product
+
+
+def _catalog_settings_model():
+    """Tolera una recarga parcial de Streamlit Cloud durante cambios de esquema."""
+    existing_model = getattr(entity_models, 'CatalogSettings', None)
+    if existing_model is not None:
+        return existing_model
+
+    class CatalogSettings(entity_models.Base):
+        __tablename__ = 'catalog_settings'
+        id = Column(Integer, primary_key=True)
+        slug = Column(String(length=80), nullable=False, unique=True, index=True,
+                      default='mi-negocio')
+        is_published = Column(Boolean, nullable=False, default=False)
+        headline = Column(String(length=180), nullable=True, default='')
+        about = Column(String(length=800), nullable=True, default='')
+        whatsapp = Column(String(length=40), nullable=True, default='')
+        business_hours = Column(String(length=300), nullable=True, default='')
+        service_message = Column(String(length=300), nullable=True, default='')
+        show_out_of_stock = Column(Boolean, nullable=False, default=True)
+
+    entity_models.CatalogSettings = CatalogSettings
+    return CatalogSettings
+
+
+def _ensure_product_catalog_fields():
+    field_definitions = {
+        'catalog_visible': Column(Boolean, nullable=False, default=False, index=True),
+        'catalog_featured': Column(Boolean, nullable=False, default=False),
+        'catalog_description': Column(String(length=500), nullable=True, default=''),
+        'catalog_image_data': Column(Text, nullable=True, default=''),
+        'catalog_image_mime': Column(String(length=40), nullable=True, default=''),
+    }
+    for field_name, definition in field_definitions.items():
+        if not hasattr(Product, field_name):
+            setattr(Product, field_name, definition)
+
+
+CatalogSettings = _catalog_settings_model()
+_ensure_product_catalog_fields()
 
 
 def normalize_catalog_slug(value):
