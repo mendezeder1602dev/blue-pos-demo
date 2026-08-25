@@ -1,4 +1,5 @@
 """Creación y migración de esquema, compartida entre la app de escritorio y la web."""
+import os
 from datetime import datetime
 
 from sqlalchemy import create_engine, inspect, text
@@ -99,19 +100,30 @@ def create_database(database_url=DB_URL):
             'cashier': "VARCHAR(120) DEFAULT 'Vendedor'",
             'status': "VARCHAR(30) DEFAULT 'Completada'",
             'reversal_reason': "VARCHAR(300) DEFAULT ''", 'reversed_at': 'DATETIME',
+            'returned_at': 'DATETIME', 'return_reason': "VARCHAR(300) DEFAULT ''",
+            'refund_method': "VARCHAR(50) DEFAULT ''",
             'customer': "VARCHAR(120) DEFAULT 'Público general'",
         })
         add_columns(connection, 'expenses', {
             'created_at': 'DATETIME', 'is_active': 'BOOLEAN DEFAULT 1',
+            'payment_method': "VARCHAR(30) DEFAULT 'Efectivo'",
+            'category': "VARCHAR(80) DEFAULT 'Operación'",
+            'beneficiary': "VARCHAR(120) DEFAULT ''",
+            'reference': "VARCHAR(120) DEFAULT ''",
+            'affects_cash': 'BOOLEAN DEFAULT 1',
         })
         add_columns(connection, 'cash_openings', {
             'denomination_details': "TEXT DEFAULT '{}'",
             'source_close_id': 'INTEGER',
+            'shift_responsible': "VARCHAR(120) DEFAULT 'Vendedor'",
         })
         add_columns(connection, 'cash_closes', {
             'denomination_details': "TEXT DEFAULT '{}'",
         })
-    _clean_demo_operational_data_once(engine)
+    # Una limpieza nunca debe formar parte del arranque normal. Se conserva
+    # exclusivamente para entornos demo creados de forma deliberada.
+    if os.getenv('BLUE_POS_DEMO_RESET', '').strip().lower() in ('1', 'true', 'yes'):
+        _clean_demo_operational_data_once(engine)
 
 
 def create_auth_database():

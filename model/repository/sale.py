@@ -238,6 +238,32 @@ class SaleRepository(RepositoryObserver):
         self._notify_on_data_changed_listeners()
         return sales
 
+    def return_transaction(self, transaction_id: str, reason: str, refund_method: str):
+        """Devuelve un ticket completo, repone existencias y conserva la evidencia."""
+        reason = (reason or '').strip()
+        if len(reason) < 5:
+            raise ValueError('Escribe un motivo de devolución de al menos 5 caracteres.')
+        if refund_method not in ('Efectivo', 'Tarjeta', 'Transferencia', 'Vale'):
+            raise ValueError('Selecciona un método de reembolso válido.')
+        sales = list(self.__session.scalars(
+            select(Sale).where(Sale.transaction_id == transaction_id)
+        ).all())
+        if not sales or any(sale.status != 'Completada' for sale in sales):
+            raise ValueError('La operación no existe o ya fue anulada o devuelta.')
+        restored = {}
+        for sale in sales:
+            restored[sale.product_id] = restored.get(sale.product_id, 0) + 1
+            sale.status = 'Devuelta'
+            sale.returned_at = datetime.now()
+            sale.return_reason = reason
+            sale.refund_method = refund_method
+        for product_id, quantity in restored.items():
+            self.__session.execute(update(Product).where(Product.id == product_id).values(
+                quantity=Product.quantity + quantity))
+        self.__session.commit()
+        self._notify_on_data_changed_listeners()
+        return sales
+
     def __check_sales_exists(self, sale_id_list: list):
         found_ids = set(self.__session.scalars(
             select(Sale.id).where(Sale.id.in_(sale_id_list))
@@ -307,7 +333,7 @@ class SaleRepository(RepositoryObserver):
         )
 
     def get_all_sales(self) -> list:
-        return self.__session.scalars(select(Sale).where(Sale.status != 'Anulada')).all()
+        return self.__session.scalars(select(Sale).where(Sale.status == 'Completada')).all()
 
     def get_sales_by_filter(self, the_filter: SaleFilter) -> list:
         filter_query = SaleRepository.__create_filter_query(the_filter)
@@ -315,7 +341,7 @@ class SaleRepository(RepositoryObserver):
 
     @staticmethod
     def __create_filter_query(the_filter: SaleFilter):
-        query = select(Sale, ).where(Sale.status != 'Anulada')
+        query = select(Sale, ).where(Sale.status == 'Completada')
 
         if the_filter.minimum_date is not None:
             query = query.where(Sale.date >= the_filter.minimum_date)

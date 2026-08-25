@@ -85,6 +85,9 @@ class Sale(Base):
     status = Column(String(length=30), nullable=False, default='Completada', index=True)
     reversal_reason = Column(String(length=300), nullable=True, default='')
     reversed_at = Column(DateTime, nullable=True)
+    returned_at = Column(DateTime, nullable=True)
+    return_reason = Column(String(length=300), nullable=True, default='')
+    refund_method = Column(String(length=50), nullable=True, default='')
     customer = Column(String(length=120), nullable=True, default='Público general')
     # Las eliminaciones físicas sólo se reservan para mantenimiento/pruebas. La
     # aplicación usa archivado lógico y nunca invoca este borrado sobre ventas reales.
@@ -145,6 +148,11 @@ class Expense(Base):
     date = Column(Date, nullable=False, default=date.today)
     created_at = Column(DateTime, nullable=False, default=datetime.now)
     is_active = Column(Boolean, nullable=False, default=True)
+    payment_method = Column(String(length=30), nullable=False, default='Efectivo')
+    category = Column(String(length=80), nullable=False, default='Operación')
+    beneficiary = Column(String(length=120), nullable=True, default='')
+    reference = Column(String(length=120), nullable=True, default='')
+    affects_cash = Column(Boolean, nullable=False, default=True)
 
 
 class HeldSale(Base):
@@ -215,6 +223,7 @@ class CashOpening(Base):
     opening_amount = Column(MoneyColumn(), nullable=False, default=CUPMoney('0.00'))
     cash_limit = Column(MoneyColumn(), nullable=False, default=CUPMoney('3000.00'))
     opened_by = Column(String(length=120), nullable=False)
+    shift_responsible = Column(String(length=120), nullable=False, default='Vendedor')
     notes = Column(String(length=400), nullable=True, default='')
     denomination_details = Column(Text, nullable=True, default='{}')
     source_close_id = Column(Integer, nullable=True)

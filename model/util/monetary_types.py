@@ -8,7 +8,7 @@ def MXNMoney(amount: str) -> Money:
     return Money(amount=amount, currency=MONEY_CURRENCY)
 
 
-# Compatibilidad temporal para extensiones y bases de pruebas de Blue POS.
+# Compatibilidad temporal para extensiones y bases de pruebas de Puntos ECCOS.
 # El nombre histórico se conserva, pero ya siempre crea importes MXN.
 def CUPMoney(amount: str) -> Money:
     return MXNMoney(amount)

@@ -52,12 +52,12 @@ class UserRepository:
     def authenticate(self, username, password):
         user = self.__session.scalars(select(User).where(User.username == username)).first()
         return user if user and self._verify(password, user.password_hash) else None
-    def create_session(self, user, duration_days=7):
+    def create_session(self, user, duration_hours=12):
         token = secrets.token_urlsafe(32)
         session = AuthSession(
             token_hash=hashlib.sha256(token.encode()).hexdigest(),
             user_id=user.id,
-            expires_at=datetime.utcnow() + timedelta(days=duration_days),
+            expires_at=datetime.utcnow() + timedelta(hours=duration_hours),
         )
         self.__session.add(session)
         self.__session.commit()

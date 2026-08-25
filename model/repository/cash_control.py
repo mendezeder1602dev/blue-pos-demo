@@ -26,6 +26,7 @@ class CashControlRepository:
             raise ValueError(f'La caja de {opening.date} ya fue abierta.')
         if not opening.opened_by.strip():
             raise ValueError('Indica quién autoriza la apertura.')
+        opening.shift_responsible = (opening.shift_responsible or 'Vendedor').strip()
         if opening.opening_amount.amount < 0:
             raise ValueError('El fondo inicial no puede ser negativo.')
         if opening.cash_limit.amount <= 0:

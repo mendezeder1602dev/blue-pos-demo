@@ -134,6 +134,16 @@ class ExpenseRepository:
         old_expense.description = updated_expense.description
         old_expense.spent_money = updated_expense.spent_money
         old_expense.date = updated_expense.date
+        old_expense.payment_method = updated_expense.payment_method or old_expense.payment_method or 'Efectivo'
+        old_expense.category = updated_expense.category or old_expense.category or 'Operación'
+        old_expense.beneficiary = (updated_expense.beneficiary
+                                   if updated_expense.beneficiary is not None
+                                   else old_expense.beneficiary)
+        old_expense.reference = (updated_expense.reference
+                                 if updated_expense.reference is not None
+                                 else old_expense.reference)
+        if updated_expense.affects_cash is not None:
+            old_expense.affects_cash = updated_expense.affects_cash
 
         self.__session.flush()
         self.__session.commit()

@@ -1,5 +1,5 @@
 from sqlalchemy.orm import Session
-from model.entity.models import Product, Sale
+from model.entity.models import AuditLog, Product, Sale, StockMovement
 from sqlalchemy import select, delete, update, cast, Float
 
 from model.repository.exc.product import UniqueProductNameException, NonExistentProductException, \
@@ -159,6 +159,69 @@ class ProductRepository(RepositoryObserver):
         found_product.is_active = False
         self.__session.commit()
         self._notify_on_data_changed_listeners()
+
+    def import_inventory(self, plans, actor):
+        """Crea o actualiza un lote completo; cualquier error revierte toda la importación."""
+        created = updated = added_units = 0
+        try:
+            for item in plans:
+                existing_id = item.get('existing_id')
+                if existing_id is None:
+                    product = Product(
+                        name=item['name'], description=item['description'],
+                        price=CUPMoney(f"{item['price']:.2f}"),
+                        cost=CUPMoney(f"{item['cost']:.2f}"), quantity=item['quantity'],
+                        barcode=item['barcode'], category=item['category'],
+                        supplier=item['supplier'], minimum_stock=item['minimum_stock'])
+                    self.__check_name_is_not_used(product)
+                    self.__check_barcode_can_be_used(product)
+                    self.__session.add(product)
+                    created += 1
+                    added_units += item['quantity']
+                    continue
+
+                product = self.__session.get(Product, existing_id)
+                if product is None or not product.is_active:
+                    raise ValueError(f'El producto “{item["name"]}” ya no está disponible.')
+                previous_stock = product.quantity
+                if item['action'] == 'Actualizar y sumar existencias':
+                    resulting_stock = previous_stock + item['quantity']
+                elif item['action'] == 'Actualizar y reemplazar existencias':
+                    resulting_stock = item['quantity']
+                else:
+                    raise ValueError(f'Acción no válida para “{item["name"]}”.')
+
+                product.name = item['name']
+                product.description = item['description']
+                product.price = CUPMoney(f"{item['price']:.2f}")
+                product.cost = CUPMoney(f"{item['cost']:.2f}")
+                product.quantity = resulting_stock
+                product.barcode = item['barcode']
+                product.category = item['category']
+                product.supplier = item['supplier']
+                product.minimum_stock = item['minimum_stock']
+                delta = resulting_stock - previous_stock
+                if delta:
+                    self.__session.add(StockMovement(
+                        product_id=product.id, movement_type='Importación Excel', quantity=delta,
+                        previous_stock=previous_stock, resulting_stock=resulting_stock,
+                        reason='Carga masiva de inventario validada por administrador',
+                        reference='Excel', performed_by=actor))
+                updated += 1
+                added_units += delta
+
+            self.__session.flush()
+            self.__session.add(AuditLog(
+                event_type='inventario_importado', actor=actor, entity_type='inventory',
+                detail=(f'Importación Excel: {created} nuevos, {updated} actualizados, '
+                        f'variación neta {added_units:+d} unidades.'),
+            ))
+            self.__session.commit()
+        except Exception:
+            self.__session.rollback()
+            raise
+        self._notify_on_data_changed_listeners()
+        return {'created': created, 'updated': updated, 'unit_delta': added_units}
 
     def __check_product_exists(self, product) -> Product:
         found_product = self.__find_product_by_id(product.id)

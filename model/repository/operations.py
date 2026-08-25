@@ -22,7 +22,8 @@ class OperationsRepository:
             select(AuditLog).order_by(AuditLog.created_at.desc()).limit(limit)
         ).all())
 
-    def adjust_stock(self, product_id, delta, movement_type, reason, actor, reference=''):
+    def adjust_stock(self, product_id, delta, movement_type, reason, actor, reference='',
+                     unit_cost=None, update_average_cost=False):
         product = self.__session.scalar(select(Product).where(Product.id == product_id))
         if product is None:
             raise ValueError('El producto ya no existe.')
@@ -30,6 +31,26 @@ class OperationsRepository:
         resulting = previous + int(delta)
         if resulting < 0:
             raise ValueError('El ajuste dejaría existencias negativas.')
+        cost_detail = ''
+        if unit_cost is not None:
+            unit_cost = float(unit_cost)
+            if int(delta) <= 0:
+                raise ValueError('El costo de compra solo puede registrarse en una entrada.')
+            if unit_cost <= 0:
+                raise ValueError('El costo unitario debe ser mayor que cero.')
+            previous_cost = float(product.cost.amount)
+            if update_average_cost:
+                average_cost = (
+                    (previous * previous_cost) + (int(delta) * unit_cost)
+                ) / resulting
+                product.cost = CUPMoney(f'{average_cost:.2f}')
+                cost_detail = (
+                    f' Costo ${previous_cost:.2f} → ${average_cost:.2f} MXN; '
+                    f'compra ${unit_cost:.2f} MXN por unidad.')
+            else:
+                cost_detail = (
+                    f' Costo de compra ${unit_cost:.2f} MXN por unidad; '
+                    'costo del producto conservado.')
         product.quantity = resulting
         self.__session.add(StockMovement(
             product_id=product.id, movement_type=movement_type, quantity=int(delta),
@@ -39,7 +60,8 @@ class OperationsRepository:
         self.__session.add(AuditLog(
             event_type='inventario_ajustado', actor=actor, entity_type='product',
             entity_id=str(product.id),
-            detail=f'{movement_type}: {delta:+d}. {previous} → {resulting}. {reason}',
+            detail=(f'{movement_type}: {delta:+d}. {previous} → {resulting}. '
+                    f'{reason}.{cost_detail}'),
         ))
         self.__session.commit()
         return product

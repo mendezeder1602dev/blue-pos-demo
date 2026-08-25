@@ -1,4 +1,4 @@
-# Publicar la demo de Blue POS
+# Publicar una demostración de Puntos ECCOS
 
 ## Streamlit Community Cloud
 

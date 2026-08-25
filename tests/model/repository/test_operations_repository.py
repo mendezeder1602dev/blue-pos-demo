@@ -55,6 +55,23 @@ class TestOperationsRepository(unittest.TestCase):
             self.repository.adjust_stock(
                 self.product.id, -11, 'Merma o daño', 'Daño identificado', 'Administrador')
 
+    def test_purchase_entry_can_update_weighted_average_cost(self):
+        updated = self.repository.adjust_stock(
+            self.product.id, 10, 'Entrada de compra', 'Recepción de proveedor',
+            'Administrador', 'FAC-100', unit_cost=14,
+            update_average_cost=True)
+
+        self.assertEqual(updated.quantity, 20)
+        self.assertEqual(float(updated.cost.amount), 12.00)
+        self.assertIn('Costo $10.00 → $12.00 MXN',
+                      self.repository.get_audit_logs()[0].detail)
+
+    def test_merchandise_loss_cannot_register_purchase_cost(self):
+        with self.assertRaises(ValueError):
+            self.repository.adjust_stock(
+                self.product.id, -1, 'Merma', 'Producto dañado', 'Administrador',
+                unit_cost=10)
+
 
 if __name__ == '__main__':
     unittest.main()
