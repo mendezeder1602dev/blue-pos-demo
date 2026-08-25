@@ -1,10 +1,11 @@
-from sqlalchemy import select
+from sqlalchemy import FLOAT, cast, func, select
 
 from model.entity.models import CashClose
 from model.util.monetary_types import CUPMoney
 
 
 class CashCloseRepository:
+    """Persiste cierres diarios y consultas de conciliación de efectivo."""
     def __init__(self, session):
         self.__session = session
 
@@ -38,6 +39,14 @@ class CashCloseRepository:
         return self.__session.scalars(
             select(CashClose).order_by(CashClose.date.desc(), CashClose.id.desc())
         ).all()
+
+    def get_difference_between(self, initial_date, final_date) -> float:
+        """Suma sobrantes y faltantes en SQL para el periodo solicitado."""
+        value = self.__session.scalar(
+            select(func.sum(cast(CashClose.difference, FLOAT))).where(
+                CashClose.date >= initial_date, CashClose.date <= final_date)
+        )
+        return float(value or 0)
 
     def get_latest_before(self, close_date):
         """Devuelve el último cierre anterior a la fecha solicitada."""

@@ -1,4 +1,14 @@
-"""Puntos ECCOS: sistema web de punto de venta desarrollado con Streamlit.
+"""Interfaz web y orquestador principal de Puntos ECCOS.
+
+Mapa rápido para mantenimiento:
+
+* Las funciones ``_render_*`` representan páginas o bloques visuales.
+* ``ADMIN_PAGES`` y ``SELLER_PAGES`` definen navegación y visibilidad por perfil.
+* Los repositorios concentran persistencia y reglas críticas; la interfaz solamente
+  coordina entradas, mensajes y navegación.
+* Streamlit ejecuta este archivo completo en cada interacción. El estado que debe
+  sobrevivir se guarda en ``st.session_state`` y no en variables globales mutables.
+* Los documentos se generan de forma diferida para no bloquear el render normal.
 
 Ejecutar localmente con:
 
@@ -39,6 +49,8 @@ from model.inventory_excel import (
     build_import_preview, generate_inventory_template, read_inventory_workbook,
     canonical_inventory_value, inventory_field_options, validate_import_rows,
 )
+from model.upload_security import validate_image_upload
+from model.authorization import authorization_context
 from model.repository.catalog import normalize_catalog_slug
 from model.database_utilities import backup_database_bytes
 from model.entity.models import CashClose, CashMovement, CashOpening, Expense, Product, Quote, QuoteItem, Sale
@@ -47,7 +59,12 @@ from model.repository.exc.product import UniqueProductBarcodeException, UniquePr
 from model.repository.factory import RepositoryFactory
 from model.repository.product import ProductFilter
 from model.repository.sale import SaleFilter
-from model.report.exports import business_as_dict, generate_excel_bytes, generate_pdf_bytes
+from model.report.exports import (
+    business_as_dict,
+    generate_excel_bytes as _generate_excel_bytes,
+    generate_pdf_bytes as _generate_pdf_bytes,
+)
+from model.report.ticket import generate_thermal_ticket_bytes as _generate_thermal_ticket_bytes
 from model.util.monetary_types import CUPMoney
 
 LOW_STOCK_THRESHOLD = 5
@@ -74,6 +91,48 @@ CASH_DENOMINATIONS = (
 WORKSPACE_SCHEMA_VERSION = 4
 
 
+@st.cache_data(ttl='10m', max_entries=48, show_spinner=False)
+def _cached_pdf_bytes(business, title, subtitle, sections):
+    """Conserva documentos ya solicitados sin permitir crecimiento ilimitado.
+
+    El contenido completo forma parte de la clave. Por eso una venta, cambio de perfil
+    o modificación de inventario produce automáticamente un documento diferente.
+    """
+    return _generate_pdf_bytes(business, title, subtitle, sections)
+
+
+@st.cache_data(ttl='10m', max_entries=48, show_spinner=False)
+def _cached_excel_bytes(business, title, subtitle, sections):
+    return _generate_excel_bytes(business, title, subtitle, sections)
+
+
+def generate_pdf_bytes(business, title, subtitle, sections):
+    """Devuelve un callback: Streamlit construye el PDF únicamente al descargar."""
+    return lambda: _cached_pdf_bytes(business, title, subtitle, sections)
+
+
+def generate_excel_bytes(business, title, subtitle, sections):
+    """Devuelve un callback: Streamlit construye Excel únicamente al descargar."""
+    return lambda: _cached_excel_bytes(business, title, subtitle, sections)
+
+
+@st.cache_data(ttl='10m', max_entries=96, show_spinner=False)
+def _cached_thermal_ticket(business, folio, created_at, items, payment_method,
+                           payment_details, customer, paper_width_mm, ticket_title):
+    return _generate_thermal_ticket_bytes(
+        business, folio, created_at, items, payment_method, payment_details,
+        customer, paper_width_mm, ticket_title)
+
+
+def _thermal_ticket_download(business, folio, created_at, items, payment_method,
+                             payment_details='', customer='', paper_width_mm=80,
+                             ticket_title='TICKET DE VENTA'):
+    """Difere el ticket térmico hasta que el usuario pulsa Descargar."""
+    return lambda: _cached_thermal_ticket(
+        business, folio, created_at, items, payment_method, payment_details,
+        customer, paper_width_mm, ticket_title)
+
+
 def _mxn(value):
     """Formato monetario único para pesos mexicanos en interfaz y documentos."""
     return f'${float(value):,.2f} {CURRENCY_CODE}'
@@ -84,6 +143,16 @@ def _sale_folio(sale_id):
     return f'V-{int(sale_id):06d}'
 
 st.set_page_config(page_title='Puntos ECCOS', page_icon='🛒', layout='wide')
+
+# Los traductores automáticos del navegador reemplazan nodos de texto directamente.
+# React/Streamlit conserva referencias a esos nodos y, al navegar, puede intentar
+# retirarlos por segunda vez (`removeChild: node is not a child`). La interfaz ya está
+# localizada en español, por lo que indicamos explícitamente que no debe traducirse.
+st.html('''
+<meta name="google" content="notranslate">
+<meta http-equiv="Content-Language" content="es-MX">
+<style>body { translate: no; }</style>
+''')
 
 
 def _apply_brand_theme():
@@ -451,13 +520,6 @@ def _render_login():
         )
 
         if role_label == 'Administrador':
-            blocked_until = st.session_state.get('auth_blocked_until')
-            login_blocked = bool(blocked_until and datetime.now() < blocked_until)
-            if login_blocked:
-                seconds = max(1, int((blocked_until - datetime.now()).total_seconds()))
-                st.warning(
-                    f'Acceso pausado por seguridad. Intenta nuevamente en {seconds} segundos.',
-                    icon=':material/timer:')
             with st.form('login_form', border=False, enter_to_submit=False):
                 username = st.text_input('Usuario', placeholder='Escribe tu usuario', icon=':material/person:')
                 password = st.text_input(
@@ -466,24 +528,22 @@ def _render_login():
                 )
                 submitted = st.form_submit_button(
                     'Iniciar sesión', type='primary', width='stretch', icon=':material/login:',
-                    disabled=login_blocked,
                 )
             if submitted:
                 users = RepositoryFactory.get_user_repository()
                 user = users.authenticate(username.strip(), password)
                 if user is None:
-                    attempts = st.session_state.get('auth_failed_attempts', 0) + 1
-                    st.session_state['auth_failed_attempts'] = attempts
-                    if attempts >= 5:
-                        st.session_state['auth_blocked_until'] = (
-                            datetime.now() + timedelta(seconds=60))
-                        st.session_state['auth_failed_attempts'] = 0
-                    st.error('Usuario o contraseña incorrectos.', icon=':material/error:')
+                    blocked_seconds = users.login_block_seconds(username.strip())
+                    if blocked_seconds:
+                        remaining = max(1, blocked_seconds // 60 + 1)
+                        st.error(
+                            f'Acceso bloqueado temporalmente. Intenta nuevamente en '
+                            f'{remaining} minuto(s).', icon=':material/timer:')
+                    else:
+                        st.error('Usuario o contraseña incorrectos.', icon=':material/error:')
                 elif user.role != 'superuser':
                     st.error('Selecciona el perfil asociado a esta cuenta.', icon=':material/error:')
                 else:
-                    st.session_state.pop('auth_failed_attempts', None)
-                    st.session_state.pop('auth_blocked_until', None)
                     _log_in(user)
         else:
             st.caption('Acceso rápido para cobrar y consultar existencias, sin información financiera sensible.')
@@ -516,17 +576,14 @@ def _log_in(user, persist=True):
     st.session_state['_workspace_schema_version'] = WORKSPACE_SCHEMA_VERSION
     st.session_state['user'] = user
     st.session_state['page'] = 'Tablero'
-    if persist and getattr(user, 'id', None) is not None:
-        token = RepositoryFactory.get_user_repository().create_session(user)
-        st.query_params['session'] = token
+    # Nunca se coloca una credencial en la URL. El usuario vive únicamente en
+    # el estado privado de esta sesión de Streamlit.
+    st.query_params.pop('session', None)
     st.rerun()
 
 
 def _log_out():
-    token = st.query_params.get('session')
-    if token:
-        RepositoryFactory.get_user_repository().revoke_session(token)
-        del st.query_params['session']
+    st.query_params.pop('session', None)
     st.session_state.pop('user', None)
     st.session_state.pop('page', None)
     st.rerun()
@@ -607,8 +664,10 @@ def _render_dashboard():
                     st.session_state['page'] = 'Inventario'
                     st.rerun()
             return
-        low_stock = _get_low_stock_products()
-        out_of_stock = _get_out_of_stock_products()
+        low_stock = [product for product in catalog_products
+                     if 0 < product.quantity <= (product.minimum_stock
+                                                  or LOW_STOCK_THRESHOLD)]
+        out_of_stock = [product for product in catalog_products if product.quantity <= 0]
         low_margin = [product for product in catalog_products
                       if float(product.price.amount) > 0
                       and ((float(product.price.amount) - float(product.cost.amount))
@@ -1103,22 +1162,31 @@ def _render_sales():
                     f' · Cliente: {first_sale.customer or "Público general"}'
                     f' · {first_sale.payment_details or "Sin referencia"}'
                 )
+                thermal_items = tuple({
+                    'name': name, 'quantity': line['quantity'],
+                    'unit_price': line['total'] / line['quantity'],
+                } for name, line in product_lines.items())
                 ticket_actions = st.columns(2)
                 ticket_actions[0].download_button(
-                    'Ticket PDF',
-                    generate_pdf_bytes(business, f'Ticket de venta {commercial_folio}',
-                                       ticket_subtitle, [('Productos', ticket_rows)]),
-                    f'ticket-venta-{first_sale.id}.pdf', 'application/pdf',
-                    key=f'ticket_pdf_{first_sale.id}', icon=':material/picture_as_pdf:',
+                    'Ticket térmico 58 mm',
+                    _thermal_ticket_download(
+                        business, commercial_folio, first_sale.created_at or first_sale.date,
+                        thermal_items, first_sale.payment_method or 'Sin método',
+                        first_sale.payment_details or '',
+                        first_sale.customer or 'Público general', 58),
+                    f'ticket-{commercial_folio}-58mm.pdf', 'application/pdf',
+                    key=f'ticket_58_{first_sale.id}', icon=':material/receipt_long:',
                     width='stretch',
                 )
                 ticket_actions[1].download_button(
-                    'Ticket Excel',
-                    generate_excel_bytes(business, f'Ticket de venta {commercial_folio}',
-                                         ticket_subtitle, [('Productos', ticket_rows)]),
-                    f'ticket-venta-{first_sale.id}.xlsx',
-                    'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
-                    key=f'ticket_excel_{first_sale.id}', icon=':material/table_view:',
+                    'Ticket térmico 80 mm',
+                    _thermal_ticket_download(
+                        business, commercial_folio, first_sale.created_at or first_sale.date,
+                        thermal_items, first_sale.payment_method or 'Sin método',
+                        first_sale.payment_details or '',
+                        first_sale.customer or 'Público general', 80),
+                    f'ticket-{commercial_folio}-80mm.pdf', 'application/pdf',
+                    key=f'ticket_80_{first_sale.id}', icon=':material/receipt_long:',
                     width='stretch',
                 )
                 if _is_administrator():
@@ -1249,6 +1317,7 @@ def _render_inventory_excel_import(products):
                     f'No se guardó ninguna fila. Revisa el archivo: {error}',
                     icon=':material/error:')
 
+@st.fragment
 def _render_inventory_downloads(products, key_prefix, include_cost):
     rows = []
     for product in products:
@@ -1776,7 +1845,7 @@ def _render_express_sale():
         with st.container(border=True):
             st.subheader('Ticket de venta', icon=':material/receipt_long:')
             st.caption(
-                f"Folio #{last_ticket['folio']} · {last_ticket['created_at']} · "
+                f"Folio {last_ticket['folio']} · {last_ticket['created_at']} · "
                 f"{last_ticket['payment_method']}"
             )
             ticket_summary = st.columns(3)
@@ -1802,24 +1871,31 @@ def _render_express_sale():
                 f"{last_ticket['payment_details'] or 'Sin referencia'}"
             )
             business = _business_export_data()
+            thermal_items = ({
+                'name': last_ticket['name'],
+                'quantity': last_ticket['quantity'],
+                'unit_price': last_ticket['unit_price'],
+            },)
             ticket_actions = st.columns(2)
             ticket_actions[0].download_button(
-                'Descargar ticket PDF',
-                generate_pdf_bytes(
-                    business, f"Ticket de venta express #{last_ticket['folio']}",
-                    ticket_subtitle, [('Productos', ticket_rows)]),
-                f"ticket-venta-express-{last_ticket['folio']}.pdf",
+                'Ticket térmico 58 mm',
+                _thermal_ticket_download(
+                    business, last_ticket['folio'], last_ticket['created_at'],
+                    thermal_items, last_ticket['payment_method'],
+                    last_ticket['payment_details'], '', 58, 'TICKET DE VENTA EXPRÉS'),
+                f"ticket-express-{last_ticket['folio']}-58mm.pdf",
                 'application/pdf', key='express_ticket_pdf',
-                icon=':material/picture_as_pdf:', width='stretch',
+                icon=':material/receipt_long:', width='stretch',
             )
             ticket_actions[1].download_button(
-                'Descargar ticket Excel',
-                generate_excel_bytes(
-                    business, f"Ticket de venta express #{last_ticket['folio']}",
-                    ticket_subtitle, [('Productos', ticket_rows)]),
-                f"ticket-venta-express-{last_ticket['folio']}.xlsx",
-                'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
-                key='express_ticket_excel', icon=':material/table_view:', width='stretch',
+                'Ticket térmico 80 mm',
+                _thermal_ticket_download(
+                    business, last_ticket['folio'], last_ticket['created_at'],
+                    thermal_items, last_ticket['payment_method'],
+                    last_ticket['payment_details'], '', 80, 'TICKET DE VENTA EXPRÉS'),
+                f"ticket-express-{last_ticket['folio']}-80mm.pdf",
+                'application/pdf', key='express_ticket_excel',
+                icon=':material/receipt_long:', width='stretch',
             )
     name = st.text_input('Artículo o servicio', placeholder='Ej. Entrega especial')
     columns = st.columns(3)
@@ -2323,6 +2399,11 @@ def _render_expenses():
 # ---------------------------------------------------------------------------
 
 def _summary_for_range(initial_date: date, final_date: date):
+    """Devuelve el resumen financiero y sus registros para un intervalo inclusivo.
+
+    Se usa cuando la página también necesita el detalle de ventas y gastos. Las
+    gráficas de tendencia usan agregaciones SQL para no llamar esta función por día.
+    """
     sale_filter = SaleFilter()
     sale_filter.minimum_date = initial_date
     sale_filter.maximum_date = final_date
@@ -2425,8 +2506,23 @@ def _render_cash_denominations(key_prefix, defaults=None):
             key=f'{key_prefix}_{code}')
         details[code] = int(pieces)
         total += int(pieces) * denomination
-    st.metric('Total contado', _mxn(total))
+    with st.container(border=True):
+        st.caption('Total contado')
+        st.markdown(f'### {_mxn(total)}')
     return total, details
+
+
+def _render_cash_summary_cards(items):
+    """Muestra indicadores de caja con una estructura DOM simple y estable.
+
+    Se evita ``st.metric`` en estas vistas porque el navegador observado modifica sus
+    nodos monetarios y React falla al reconciliarlos durante la navegación.
+    """
+    with st.container(horizontal=True, gap='small'):
+        for label, value in items:
+            with st.container(border=True, width='stretch'):
+                st.caption(label)
+                st.markdown(f'### {value}')
 
 
 def _require_open_cash_for_sale():
@@ -2507,9 +2603,12 @@ def _render_cash_opening():
 
         if previous_close is not None:
             carry_difference = float(opening_amount) - suggested_amount
-            st.metric('Diferencia contra el cierre anterior', _mxn(carry_difference),
-                      delta='Sin diferencia' if abs(carry_difference) < .005 else
-                      ('Efectivo agregado' if carry_difference > 0 else 'Efectivo retirado'))
+            carry_status = ('Sin diferencia' if abs(carry_difference) < .005 else
+                            'Efectivo agregado' if carry_difference > 0 else
+                            'Efectivo retirado')
+            _render_cash_summary_cards(((
+                f'Diferencia contra el cierre anterior · {carry_status}',
+                _mxn(carry_difference)),))
         opening_columns = st.columns(2)
         shift_responsible = opening_columns[0].text_input(
             'Responsable del turno *', placeholder='Nombre de quien operará la caja',
@@ -2568,12 +2667,13 @@ def _render_cash_opening():
     st.success(
         f'Caja abierta por {opening.opened_by} · turno de {opening.shift_responsible}.',
         icon=':material/lock_open:')
-    status_metrics = st.columns(4)
-    status_metrics[0].metric('Fondo inicial', _mxn(opening.opening_amount.amount))
-    status_metrics[1].metric('Ventas en efectivo', _mxn(payment_totals['Efectivo']))
-    status_metrics[2].metric('Entradas / retiros',
-                             f"{_mxn(movement_totals['Entrada'])} / {_mxn(movement_totals['Retiro'])}")
-    status_metrics[3].metric('Efectivo estimado', _mxn(estimated_cash))
+    _render_cash_summary_cards((
+        ('Fondo inicial', _mxn(opening.opening_amount.amount)),
+        ('Ventas en efectivo', _mxn(payment_totals['Efectivo'])),
+        ('Entradas autorizadas', _mxn(movement_totals['Entrada'])),
+        ('Retiros autorizados', _mxn(movement_totals['Retiro'])),
+        ('Efectivo estimado', _mxn(estimated_cash)),
+    ))
     source_text = (f'Cierre de origen: #{opening.source_close_id}'
                    if opening.source_close_id else 'Apertura sin cierre anterior vinculado')
     st.caption(f'{source_text} · Límite: {_mxn(opening.cash_limit.amount)} · '
@@ -2662,14 +2762,14 @@ def _render_cash_close():
     movement_totals = control_repository.totals_for_date(selected_date)
 
     st.markdown('#### Resumen del sistema')
-    operation_metrics = st.columns(3)
-    operation_metrics[0].metric('Operaciones', operation_count)
-    operation_metrics[1].metric('Ventas totales', _mxn(total_sales))
-    operation_metrics[2].metric('Gastos registrados', _mxn(total_expenses))
-    payment_metrics = st.columns(3)
-    payment_metrics[0].metric('Efectivo', _mxn(payment_totals['Efectivo']))
-    payment_metrics[1].metric('Tarjeta', _mxn(payment_totals['Tarjeta']))
-    payment_metrics[2].metric('Transferencia', _mxn(payment_totals['Transferencia']))
+    _render_cash_summary_cards((
+        ('Operaciones', str(operation_count)),
+        ('Ventas totales', _mxn(total_sales)),
+        ('Gastos registrados', _mxn(total_expenses)),
+        ('Efectivo', _mxn(payment_totals['Efectivo'])),
+        ('Tarjeta', _mxn(payment_totals['Tarjeta'])),
+        ('Transferencia', _mxn(payment_totals['Transferencia'])),
+    ))
 
     st.markdown('#### Estado de la jornada')
     if opening is None:
@@ -2712,11 +2812,12 @@ def _render_cash_close():
         estimated_drawer_cash = (float(opening.opening_amount.amount)
                                  + payment_totals['Efectivo']
                                  + movement_totals['Entrada'] - movement_totals['Retiro'])
-        opening_metrics = st.columns(4)
-        opening_metrics[0].metric('Fondo inicial', _mxn(opening.opening_amount.amount))
-        opening_metrics[1].metric('Entradas autorizadas', _mxn(movement_totals['Entrada']))
-        opening_metrics[2].metric('Retiros autorizados', _mxn(movement_totals['Retiro']))
-        opening_metrics[3].metric('Efectivo estimado', _mxn(estimated_drawer_cash))
+        _render_cash_summary_cards((
+            ('Fondo inicial', _mxn(opening.opening_amount.amount)),
+            ('Entradas autorizadas', _mxn(movement_totals['Entrada'])),
+            ('Retiros autorizados', _mxn(movement_totals['Retiro'])),
+            ('Efectivo estimado', _mxn(estimated_drawer_cash)),
+        ))
         st.caption(f'Caja abierta por {opening.opened_by} · Límite recomendado: '
                    f'{_mxn(opening.cash_limit.amount)} · {opening.notes or "Sin nota"}')
         if estimated_drawer_cash > float(opening.cash_limit.amount) and existing_close is None:
@@ -2822,13 +2923,13 @@ def _render_cash_close():
             denomination_details = {}
 
         difference = float(counted_cash) - expected_cash
-        reconciliation = st.columns(3)
-        reconciliation[0].metric('Efectivo esperado', _mxn(expected_cash))
-        reconciliation[1].metric('Efectivo contado', _mxn(counted_cash))
-        reconciliation[2].metric(
-            'Diferencia', _mxn(difference),
-            delta='Cuadra' if abs(difference) < .005 else ('Sobrante' if difference > 0 else 'Faltante'),
-            delta_color='normal' if difference >= 0 else 'inverse')
+        difference_status = ('Cuadra' if abs(difference) < .005 else
+                             'Sobrante' if difference > 0 else 'Faltante')
+        _render_cash_summary_cards((
+            ('Efectivo esperado', _mxn(expected_cash)),
+            ('Efectivo contado', _mxn(counted_cash)),
+            (f'Diferencia · {difference_status}', _mxn(difference)),
+        ))
         if abs(difference) < .005:
             st.success('La caja cuadra correctamente.', icon=':material/check_circle:')
         elif difference < 0:
@@ -2897,11 +2998,12 @@ def _render_cash_close():
         with st.expander(
                 f'#{cash_close.id} · {cash_close.date} · {cash_close.cashier} · {status}',
                 icon=':material/receipt_long:'):
-            history_metrics = st.columns(4)
-            history_metrics[0].metric('Ventas', _mxn(cash_close.total_sales.amount))
-            history_metrics[1].metric('Esperado', _mxn(cash_close.expected_cash.amount))
-            history_metrics[2].metric('Contado', _mxn(cash_close.counted_cash.amount))
-            history_metrics[3].metric('Diferencia', _mxn(difference))
+            _render_cash_summary_cards((
+                ('Ventas', _mxn(cash_close.total_sales.amount)),
+                ('Esperado', _mxn(cash_close.expected_cash.amount)),
+                ('Contado', _mxn(cash_close.counted_cash.amount)),
+                ('Diferencia', _mxn(difference)),
+            ))
             st.caption(cash_close.notes or 'Sin observaciones')
             rows = _cash_close_rows(cash_close)
             export_columns = st.columns(2)
@@ -2998,8 +3100,12 @@ def _render_reports():
         'ID': e.id, 'Nombre': e.name, 'Fecha': str(e.date),
         'Gastado': float(e.spent_money.amount),
     } for e in result['expenses']])
-    low_stock = _get_low_stock_products()
-    out_of_stock = _get_out_of_stock_products()
+    inventory_snapshot = RepositoryFactory.get_product_repository().get_all_products()
+    low_stock = [product for product in inventory_snapshot
+                 if not product.is_temporary and 0 < product.quantity <=
+                 (product.minimum_stock or LOW_STOCK_THRESHOLD)]
+    out_of_stock = [product for product in inventory_snapshot
+                    if not product.is_temporary and product.quantity <= 0]
     low_stock_df = pd.DataFrame(_inventory_export_rows(low_stock))
     out_of_stock_df = pd.DataFrame(_inventory_export_rows(out_of_stock))
 
@@ -3039,23 +3145,28 @@ def _render_reports():
     )
 
     tab_sales, tab_expenses, tab_low, tab_out = st.tabs([
-        'Ventas del periodo', 'Gastos del periodo', 'Por agotarse', 'Agotados'])
-    with tab_sales:
+        'Ventas del periodo', 'Gastos del periodo', 'Por agotarse', 'Agotados'],
+        on_change='rerun')
+    if tab_sales.open:
+      with tab_sales:
         st.dataframe(sales_df, width='stretch', hide_index=True, column_config={
             'Folio': st.column_config.TextColumn('Folio de venta', width='small'),
             'Cantidad': st.column_config.NumberColumn('Cantidad', format='%d'),
             'Precio unitario': st.column_config.NumberColumn(format='$ %.2f MXN'),
             'Importe': st.column_config.NumberColumn(format='$ %.2f MXN'),
         })
-    with tab_expenses:
+    if tab_expenses.open:
+      with tab_expenses:
         st.dataframe(expenses_df, width='stretch', hide_index=True)
-    with tab_low:
+    if tab_low.open:
+      with tab_low:
         if low_stock_df.empty:
             st.success('No hay productos por agotarse.')
         else:
             st.warning(f'{len(low_stock_df)} producto(s) requieren reabastecimiento.')
             st.dataframe(low_stock_df, width='stretch', hide_index=True)
-    with tab_out:
+    if tab_out.open:
+      with tab_out:
         if out_of_stock_df.empty:
             st.success('No hay productos agotados.')
         else:
@@ -3068,17 +3179,13 @@ def _render_reports():
 # ---------------------------------------------------------------------------
 
 def _render_statistics():
+    """Presenta rentabilidad por día, mes o año con una tendencia agregada en SQL."""
     _hero('Estadísticas', 'Analiza ventas, utilidad y resultado real por día, mes o año.',
           'ANÁLISIS · RENTABILIDAD')
     today = date.today()
     period = st.segmented_control(
         'Periodo de análisis', ('Día', 'Mes', 'Año'), default='Mes',
         selection_mode='single', width='stretch', key='statistics_period') or 'Mes'
-
-    def cash_difference_between(initial_date, final_date):
-        return sum(float(close.difference.amount)
-                   for close in RepositoryFactory.get_cash_close_repository().get_all()
-                   if initial_date <= close.date <= final_date)
 
     trend_rows = []
     if period == 'Día':
@@ -3098,15 +3205,21 @@ def _render_statistics():
         final_date = date(selected_year, selected_month,
                           calendar.monthrange(selected_year, selected_month)[1])
         period_label = f'{MONTH_NAMES[selected_month]} {selected_year}'
+        daily_trend = RepositoryFactory.get_economic_summary_repository().get_daily_trend(
+            initial_date, final_date)
         for day_number in range(1, final_date.day + 1):
             current_day = date(selected_year, selected_month, day_number)
-            day_result = _summary_for_range(current_day, current_day)
+            day_result = daily_trend.get(current_day, {
+                'sales': 0.0, 'cost': 0.0, 'expenses': 0.0,
+                'tickets': 0, 'units': 0,
+            })
             trend_rows.append({
                 'Periodo': f'{day_number:02d}',
-                'Ventas brutas': float(day_result['acquired_money'].amount),
-                'Utilidad bruta': float(day_result['total_profit'].amount),
-                'Utilidad neta': float(day_result['net_profit'].amount),
-                'Tickets': day_result['sale_quantity'], 'Unidades': day_result['unit_quantity'],
+                'Ventas brutas': day_result['sales'],
+                'Utilidad bruta': day_result['sales'] - day_result['cost'],
+                'Utilidad neta': (day_result['sales'] - day_result['cost']
+                                  - day_result['expenses']),
+                'Tickets': day_result['tickets'], 'Unidades': day_result['units'],
             })
     else:
         selected_year = int(st.number_input(
@@ -3114,17 +3227,25 @@ def _render_statistics():
             step=1, key='statistics_year'))
         initial_date, final_date = date(selected_year, 1, 1), date(selected_year, 12, 31)
         period_label = str(selected_year)
+        daily_trend = RepositoryFactory.get_economic_summary_repository().get_daily_trend(
+            initial_date, final_date)
         for month_number in range(1, 13):
             month_initial = date(selected_year, month_number, 1)
             month_final = date(selected_year, month_number,
                                calendar.monthrange(selected_year, month_number)[1])
-            month_result = _summary_for_range(month_initial, month_final)
+            month_days = [values for day, values in daily_trend.items()
+                          if month_initial <= day <= month_final]
+            month_result = {
+                key: sum(values[key] for values in month_days)
+                for key in ('sales', 'cost', 'expenses', 'tickets', 'units')
+            }
             trend_rows.append({
                 'Periodo': MONTH_NAMES[month_number][:3],
-                'Ventas brutas': float(month_result['acquired_money'].amount),
-                'Utilidad bruta': float(month_result['total_profit'].amount),
-                'Utilidad neta': float(month_result['net_profit'].amount),
-                'Tickets': month_result['sale_quantity'], 'Unidades': month_result['unit_quantity'],
+                'Ventas brutas': month_result['sales'],
+                'Utilidad bruta': month_result['sales'] - month_result['cost'],
+                'Utilidad neta': (month_result['sales'] - month_result['cost']
+                                  - month_result['expenses']),
+                'Tickets': month_result['tickets'], 'Unidades': month_result['units'],
             })
 
     result = _summary_for_range(initial_date, final_date)
@@ -3133,7 +3254,8 @@ def _render_statistics():
     gross_profit = float(result['total_profit'].amount)
     expenses = float(result['total_expense'].amount)
     net_profit = float(result['net_profit'].amount)
-    cash_difference = cash_difference_between(initial_date, final_date)
+    cash_difference = RepositoryFactory.get_cash_close_repository().get_difference_between(
+        initial_date, final_date)
 
     st.caption(f'Resultados de {period_label} · {initial_date} al {final_date}')
     main_metrics = st.columns(3)
@@ -3553,12 +3675,13 @@ def _render_business_profile():
         if remove_logo:
             logo_data, logo_mime = '', ''
         elif logo is not None:
-            logo_bytes = logo.getvalue()
-            if len(logo_bytes) > 2 * 1024 * 1024:
-                st.error('El logotipo supera el límite de 2 MB.', icon=':material/error:')
+            try:
+                logo_bytes, logo_mime = validate_image_upload(
+                    logo.getvalue(), 2 * 1024 * 1024, {'PNG', 'JPEG'})
+            except ValueError as error:
+                st.error(str(error), icon=':material/error:')
                 return
             logo_data = base64.b64encode(logo_bytes).decode('ascii')
-            logo_mime = logo.type
         repository.save_profile({
             'business_name': clean_name, 'legal_name': legal_name.strip(),
             'business_type': business_type, 'slogan': slogan.strip(),
@@ -3875,13 +3998,12 @@ def _render_catalog_manager():
                 image_buttons = st.columns(2)
                 if image_buttons[0].button('Guardar fotografía', type='primary',
                                            disabled=image_file is None):
-                    image_bytes = image_file.getvalue()
-                    if len(image_bytes) > 700 * 1024:
-                        st.error('La fotografía supera 700 KB. Comprímela antes de subirla.')
-                    else:
+                    try:
+                        image_bytes, image_mime = validate_image_upload(
+                            image_file.getvalue(), 700 * 1024, {'PNG', 'JPEG', 'WEBP'})
                         catalog_repository.save_product_presentation(selected_product.id, {
                             'catalog_image_data': base64.b64encode(image_bytes).decode('ascii'),
-                            'catalog_image_mime': image_file.type or 'image/jpeg',
+                            'catalog_image_mime': image_mime,
                         })
                         RepositoryFactory.get_operations_repository().audit(
                             'foto_producto_actualizada', _actor_name(), 'product',
@@ -3891,6 +4013,8 @@ def _render_catalog_manager():
                             f'La nueva imagen de “{selected_product.name}” ya se utiliza '
                             'en el catálogo.', icon=':material/add_photo_alternate:')
                         st.rerun()
+                    except ValueError as error:
+                        st.error(str(error), icon=':material/error:')
                 if image_buttons[1].button('Quitar fotografía',
                                            disabled=not bool(selected_product.catalog_image_data)):
                     catalog_repository.save_product_presentation(selected_product.id, {
@@ -4138,6 +4262,11 @@ SELLER_PAGES = {
 
 
 def _render_app():
+    """Construye la sesión autenticada y ejecuta solamente la página seleccionada.
+
+    La autorización del repositorio permanece activa durante el render. Esto protege
+    operaciones sensibles incluso si en el futuro un botón se muestra por error.
+    """
     user = st.session_state['user']
     if st.session_state.get('_workspace_schema_version') != WORKSPACE_SCHEMA_VERSION:
         schema.activate_user_workspace(user)
@@ -4201,28 +4330,19 @@ def _render_app():
         )
 
     _render_activity_notice()
-    pages[st.session_state['page']]()
+    with authorization_context(getattr(user, 'role', '')):
+        pages[st.session_state['page']]()
 
 
 def main():
+    """Punto de entrada de cada rerun: catálogo, acceso o aplicación autenticada."""
     catalog_slug = st.query_params.get('catalogo')
     if catalog_slug:
         _render_public_catalog(catalog_slug)
         return
     _bootstrap_auth()
-    if 'user' not in st.session_state:
-        token = st.query_params.get('session')
-        if token:
-            user_repository = RepositoryFactory.get_user_repository()
-            user = user_repository.authenticate_session(token)
-            if user is not None:
-                schema.activate_user_workspace(user)
-                st.session_state['_workspace_schema_ready'] = True
-                st.session_state['_workspace_schema_version'] = WORKSPACE_SCHEMA_VERSION
-                st.session_state['user'] = user
-                st.session_state['page'] = 'Tablero'
-            else:
-                del st.query_params['session']
+    # Elimina enlaces antiguos con token sin intentar autenticarlos.
+    st.query_params.pop('session', None)
     if 'user' not in st.session_state:
         _render_login()
     else:

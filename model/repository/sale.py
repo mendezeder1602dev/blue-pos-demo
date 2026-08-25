@@ -1,3 +1,5 @@
+"""Persistencia transaccional de tickets, devoluciones y existencias vendidas."""
+
 from datetime import date, datetime
 from uuid import uuid4
 
@@ -11,6 +13,7 @@ from model.repository.exc.sale import NoEnoughProductQuantityException, NonExist
     ChangeProductIdInSaleException
 from model.repository.observer import RepositoryObserver
 from model.util.monetary_types import CUPMoney
+from model.authorization import require_role
 
 
 class SaleFilter:
@@ -213,6 +216,7 @@ class SaleRepository(RepositoryObserver):
         self._notify_on_data_changed_listeners()
 
     def reverse_transaction(self, transaction_id: str, reason: str, actor: str):
+        require_role('superuser')
         """Anula una operación conservando evidencia y restaura existencias una sola vez."""
         reason = (reason or '').strip()
         if len(reason) < 5:
@@ -239,6 +243,7 @@ class SaleRepository(RepositoryObserver):
         return sales
 
     def return_transaction(self, transaction_id: str, reason: str, refund_method: str):
+        require_role('superuser')
         """Devuelve un ticket completo, repone existencias y conserva la evidencia."""
         reason = (reason or '').strip()
         if len(reason) < 5:

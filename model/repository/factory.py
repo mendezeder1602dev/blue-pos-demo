@@ -1,9 +1,8 @@
 from model.repository.economic_summary import EconomicSummaryRepository
 from model.repository.expense import ExpenseRepository
 from model.repository.product import ProductRepository
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, scoped_session, sessionmaker
 from sqlalchemy import create_engine
-from sqlalchemy.pool import NullPool
 import os
 from pathlib import Path
 from model.repository.sale import SaleRepository
@@ -32,6 +31,15 @@ AUTH_DB_URL = os.environ.get(
 
 
 class RepositoryFactory:
+    """Crea y reutiliza repositorios para la base operativa y la de credenciales.
+
+    Los repositorios operativos comparten un ``scoped_session``: cada hilo obtiene su
+    propia sesión aunque reutilice el mismo proxy. Esto evita que dos ejecuciones de
+    Streamlit compartan el estado transaccional de SQLAlchemy.
+
+    ``activate_workspace`` debe ejecutarse antes de pedir repositorios de otro negocio.
+    Cuando la URL no cambia conserva motor y repositorios para evitar reconexiones.
+    """
     __url = None
     __session: Session = None
     __product_repository = None
@@ -53,6 +61,9 @@ class RepositoryFactory:
 
     @staticmethod
     def activate_workspace(url: str):
+        """Activa una base operativa y evita reinicializarla si ya está seleccionada."""
+        if RepositoryFactory.__url == url and RepositoryFactory.__session is not None:
+            return
         """Cambia de espacio de trabajo y descarta repositorios de la sesión previa."""
         RepositoryFactory.__reset_workspace_session()
         RepositoryFactory.__create_session_if_necessary(url)
@@ -98,14 +109,16 @@ class RepositoryFactory:
 
     @staticmethod
     def __create_session_if_necessary(db_url):
+        """Inicializa un motor y una sesión aislada por hilo solamente cuando hace falta."""
         # Sin URL explícita se conserva el espacio de trabajo activo. Esto es
         # esencial después de iniciar sesión en un workspace distinto.
         db_url = db_url or RepositoryFactory.__url or DB_URL
         if RepositoryFactory.__url != db_url:
             RepositoryFactory.__reset_workspace_session()
             RepositoryFactory.__url = db_url
-            RepositoryFactory.__engine = create_engine(db_url, poolclass=NullPool)
-            RepositoryFactory.__session = Session(RepositoryFactory.__engine)
+            RepositoryFactory.__engine = create_engine(db_url, pool_pre_ping=True)
+            RepositoryFactory.__session = scoped_session(
+                sessionmaker(bind=RepositoryFactory.__engine, expire_on_commit=False))
         return RepositoryFactory.__session
 
     @staticmethod
@@ -194,10 +207,11 @@ class RepositoryFactory:
 
     @staticmethod
     def get_user_repository():
-        """Repositorio de credenciales separado de las ventas e inventario."""
+        """Devuelve credenciales desde una base separada de ventas e inventario."""
         if RepositoryFactory.__auth_session is None:
-            RepositoryFactory.__auth_engine = create_engine(AUTH_DB_URL, poolclass=NullPool)
-            RepositoryFactory.__auth_session = Session(RepositoryFactory.__auth_engine)
+            RepositoryFactory.__auth_engine = create_engine(AUTH_DB_URL, pool_pre_ping=True)
+            RepositoryFactory.__auth_session = scoped_session(
+                sessionmaker(bind=RepositoryFactory.__auth_engine, expire_on_commit=False))
             RepositoryFactory.__auth_user_repository = UserRepository(RepositoryFactory.__auth_session)
         return RepositoryFactory.__auth_user_repository
 

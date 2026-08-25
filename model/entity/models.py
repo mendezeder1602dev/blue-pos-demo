@@ -1,3 +1,9 @@
+"""Entidades persistentes de Puntos ECCOS.
+
+Los cambios de columnas deben acompañarse de una migración compatible en
+``model/schema.py`` para no romper bases ya existentes.
+"""
+
 from sqlalchemy.orm import declarative_base, relationship, backref
 from sqlalchemy import Column, ForeignKey
 from sqlalchemy import Integer, Boolean
@@ -13,6 +19,7 @@ PRODUCT_DESCRIPTION_MAX_LENGTH = 300
 PRODUCT_NAME_MAX_LENGTH = 80
 
 class Product(Base):
+    """Producto vendible con precio, costo, existencia y presentación de catálogo."""
 
     def __repr__(self):
         return '[id: {}, name: "{}", description: "{}", price: {}, cost: {},' \
@@ -55,6 +62,7 @@ class Product(Base):
 
 
 class Sale(Base):
+    """Línea de un ticket; varias líneas comparten el mismo ``transaction_id``."""
 
     def __repr__(self):
         return 'Sale(id: {}, product_id: "{}", date: "{}", price: {}, cost: {}, profit: {})'\
@@ -73,7 +81,7 @@ class Sale(Base):
     __tablename__ = 'sales'
     id = Column(Integer, primary_key=True)
     product_id = Column(Integer, ForeignKey('products.id', ondelete='CASCADE'), nullable=False)
-    date = Column(Date, nullable=False, default=date.today)
+    date = Column(Date, nullable=False, default=date.today, index=True)
     price = Column(MoneyColumn(), nullable=False, default=CUPMoney('1.00'))
     cost = Column(MoneyColumn(), nullable=False, default=CUPMoney('1.00'))
     payment_method = Column(String(length=50), nullable=False, default='cash')
@@ -101,9 +109,10 @@ class Sale(Base):
 
 
 class Quote(Base):
+    """Cotización editable que agrupa uno o más conceptos antes de vender."""
     __tablename__ = 'quotes'
     id = Column(Integer, primary_key=True)
-    date = Column(Date, nullable=False, default=date.today)
+    date = Column(Date, nullable=False, default=date.today, index=True)
     customer = Column(String(length=120), nullable=False, default='Público general')
     notes = Column(String(length=500), nullable=True, default='')
     status = Column(String(length=30), nullable=False, default='Pendiente')
@@ -128,6 +137,7 @@ EXPENSE_NAME_MAX_LENGTH = 100
 EXPENSE_DESCRIPTION_MAX_LENGTH = 600
 
 class Expense(Base):
+    """Salida operativa; ``affects_cash`` indica si reduce el efectivo esperado."""
 
     def __repr__(self):
         return 'Expense(id: {}, name: {}, description: {}, spent_money: {}, date: {})'\
@@ -147,7 +157,7 @@ class Expense(Base):
     spent_money = Column(MoneyColumn(), nullable=False, default=CUPMoney('-1.00'))
     date = Column(Date, nullable=False, default=date.today)
     created_at = Column(DateTime, nullable=False, default=datetime.now)
-    is_active = Column(Boolean, nullable=False, default=True)
+    is_active = Column(Boolean, nullable=False, default=True, index=True)
     payment_method = Column(String(length=30), nullable=False, default='Efectivo')
     category = Column(String(length=80), nullable=False, default='Operación')
     beneficiary = Column(String(length=120), nullable=True, default='')
@@ -320,6 +330,10 @@ class User(Base):
     # se guardan en la base indicada por esta clave, nunca mezclados aquí.
     workspace_key = Column(String(length=180), nullable=True, default='primary')
     credential_version = Column(Integer, nullable=False, default=0)
+    failed_login_attempts = Column(Integer, nullable=False, default=0)
+    failed_recovery_attempts = Column(Integer, nullable=False, default=0)
+    login_blocked_until = Column(DateTime, nullable=True)
+    recovery_blocked_until = Column(DateTime, nullable=True)
 
 class AuthSession(Base):
     """Sesión web revocable; nunca almacena contraseñas ni el token original."""

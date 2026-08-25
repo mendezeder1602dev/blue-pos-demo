@@ -1,3 +1,5 @@
+"""Persistencia y reglas de integridad del inventario de productos."""
+
 from sqlalchemy.orm import Session
 from model.entity.models import AuditLog, Product, Sale, StockMovement
 from sqlalchemy import select, delete, update, cast, Float
@@ -6,6 +8,7 @@ from model.repository.exc.product import UniqueProductNameException, NonExistent
     InvalidProductQuantityException, NoPositivePriceException, EmptyProductNameException, NegativeCostException, UniqueProductBarcodeException
 from model.repository.observer import RepositoryObserver
 from model.util.monetary_types import CUPMoney
+from model.authorization import require_role
 
 
 class ProductFilter:
@@ -83,6 +86,7 @@ class ProductFilter:
 
 
 class ProductRepository(RepositoryObserver):
+    """Valida duplicados, precios y existencias antes de confirmar cambios."""
 
     def __init__(self, session: Session):
         super().__init__()
@@ -148,6 +152,7 @@ class ProductRepository(RepositoryObserver):
             raise UniqueProductBarcodeException(barcode, found_product.name)
 
     def delete_product(self, product: Product):
+        require_role('superuser')
         found_product = self.__check_product_exists(product)
         self.__session.delete(found_product)
         self.__session.commit()
@@ -155,6 +160,7 @@ class ProductRepository(RepositoryObserver):
 
     def archive_product(self, product: Product):
         """Baja segura usada por el POS: oculta el producto y conserva sus ventas."""
+        require_role('superuser')
         found_product = self.__check_product_exists(product)
         found_product.is_active = False
         self.__session.commit()
@@ -162,6 +168,7 @@ class ProductRepository(RepositoryObserver):
 
     def import_inventory(self, plans, actor):
         """Crea o actualiza un lote completo; cualquier error revierte toda la importación."""
+        require_role('superuser')
         created = updated = added_units = 0
         try:
             for item in plans:
@@ -235,6 +242,7 @@ class ProductRepository(RepositoryObserver):
         ).first()
 
     def delete_products(self, product_id_list: list):
+        require_role('superuser')
         if not product_id_list:
             return
         self.__check_product_ids_exist(product_id_list)
@@ -263,6 +271,7 @@ class ProductRepository(RepositoryObserver):
                                .where(Product.id.in_(product_id_list)))
 
     def update_product(self, new: Product):
+        require_role('superuser')
         new.name = self.__normalize_name(new.name)
         self.__check_name_is_not_empty_or_whitespaces(new.name)
         self.__check_correctness_of_quantity(new)

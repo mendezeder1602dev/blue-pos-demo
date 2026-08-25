@@ -45,6 +45,13 @@ entorno o secretos de Streamlit; no deben guardarse en el repositorio.
 .\.venv\Scripts\python.exe runtests.py
 ```
 
+## Documentación para desarrolladores
+
+La arquitectura, el ciclo de Streamlit, las reglas de inventario, ventas, caja,
+permisos y caché están explicados en
+[`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md). Es el punto de entrada recomendado
+para cualquier persona que vaya a mantener el sistema.
+
 ## Publicación
 
 Las instrucciones de Streamlit Community Cloud están en

@@ -1,7 +1,10 @@
+"""Casos de uso transversales: Kardex, auditoría, clientes y ventas suspendidas."""
+
 from sqlalchemy import select
 
 from model.entity.models import AuditLog, Customer, HeldSale, HeldSaleItem, Product, StockMovement
 from model.util.monetary_types import CUPMoney
+from model.authorization import require_role
 
 
 class OperationsRepository:
@@ -24,6 +27,8 @@ class OperationsRepository:
 
     def adjust_stock(self, product_id, delta, movement_type, reason, actor, reference='',
                      unit_cost=None, update_average_cost=False):
+        """Aplica el movimiento y registra Kardex y auditoría en la misma operación."""
+        require_role('superuser')
         product = self.__session.scalar(select(Product).where(Product.id == product_id))
         if product is None:
             raise ValueError('El producto ya no existe.')
@@ -72,6 +77,7 @@ class OperationsRepository:
         ).all())
 
     def hold_sale(self, label, notes, actor, cart, prices):
+        """Guarda un carrito para continuarlo después sin modificar existencias."""
         if not cart:
             raise ValueError('No hay productos en la venta.')
         held = HeldSale(label=label.strip() or 'Venta en espera', notes=notes.strip(), created_by=actor)
@@ -97,6 +103,7 @@ class OperationsRepository:
             self.__session.commit()
 
     def add_customer(self, name, phone='', email='', tax_id='', notes=''):
+        require_role('superuser')
         name = (name or '').strip()
         if len(name) < 2:
             raise ValueError('Escribe el nombre del cliente.')
@@ -115,6 +122,7 @@ class OperationsRepository:
         ).all())
 
     def archive_customer(self, customer_id):
+        require_role('superuser')
         customer = self.__session.get(Customer, customer_id)
         if customer is not None:
             customer.is_active = False

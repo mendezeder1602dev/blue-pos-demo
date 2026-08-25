@@ -104,6 +104,8 @@ def create_database(database_url=DB_URL):
             'refund_method': "VARCHAR(50) DEFAULT ''",
             'customer': "VARCHAR(120) DEFAULT 'Público general'",
         })
+        connection.execute(text(
+            'CREATE INDEX IF NOT EXISTS idx_sales_date_status ON sales(date, status)'))
         add_columns(connection, 'expenses', {
             'created_at': 'DATETIME', 'is_active': 'BOOLEAN DEFAULT 1',
             'payment_method': "VARCHAR(30) DEFAULT 'Efectivo'",
@@ -112,6 +114,11 @@ def create_database(database_url=DB_URL):
             'reference': "VARCHAR(120) DEFAULT ''",
             'affects_cash': 'BOOLEAN DEFAULT 1',
         })
+        connection.execute(text(
+            'CREATE INDEX IF NOT EXISTS idx_expenses_date_active ON expenses(date, is_active)'))
+        connection.execute(text(
+            'CREATE INDEX IF NOT EXISTS idx_products_active_stock '
+            'ON products(is_active, is_temporary, quantity)'))
         add_columns(connection, 'cash_openings', {
             'denomination_details': "TEXT DEFAULT '{}'",
             'source_close_id': 'INTEGER',
@@ -133,11 +140,18 @@ def create_auth_database():
     User.__table__.create(engine, checkfirst=True)
     AuthSession.__table__.create(engine, checkfirst=True)
     with engine.begin() as connection:
-        columns = {row[1] for row in connection.execute(text('PRAGMA table_info(users)'))}
-        if 'workspace_key' not in columns:
-            connection.execute(text("ALTER TABLE users ADD COLUMN workspace_key VARCHAR(180) DEFAULT 'primary'"))
-        if 'credential_version' not in columns:
-            connection.execute(text("ALTER TABLE users ADD COLUMN credential_version INTEGER DEFAULT 0"))
+        columns = {column['name'] for column in inspect(engine).get_columns('users')}
+        definitions = {
+            'workspace_key': "VARCHAR(180) DEFAULT 'primary'",
+            'credential_version': 'INTEGER DEFAULT 0',
+            'failed_login_attempts': 'INTEGER DEFAULT 0',
+            'failed_recovery_attempts': 'INTEGER DEFAULT 0',
+            'login_blocked_until': 'DATETIME',
+            'recovery_blocked_until': 'DATETIME',
+        }
+        for field, definition in definitions.items():
+            if field not in columns:
+                connection.execute(text(f'ALTER TABLE users ADD COLUMN {field} {definition}'))
     repository.bootstrap_administrator()
 
 

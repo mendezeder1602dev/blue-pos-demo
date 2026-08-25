@@ -6,6 +6,7 @@ from model.repository.exc.expense import UniqueExpenseNameException, EmptyExpens
     NonPositiveExpenseMoneyException, NonExistentExpenseException
 from model.util.monetary_types import CUPMoney
 import re
+from model.authorization import require_role
 
 
 class ExpenseFilter:
@@ -74,6 +75,7 @@ class ExpenseRepository:
         self.__session = session
 
     def insert_expense(self, new_expense: Expense):
+        require_role('superuser')
         self.__check_money_is_positive(new_expense.spent_money)
         self.__check_name_is_not_empty_or_whitespaces(new_expense.name)
         self.__session.add(new_expense)
@@ -90,6 +92,7 @@ class ExpenseRepository:
             raise EmptyExpenseNameException()
 
     def delete_expenses(self, expense_ids: list):
+        require_role('superuser')
         if not expense_ids:
             return
         self.__check_expense_ids_are_assigned_in_database(expense_ids)
@@ -97,6 +100,7 @@ class ExpenseRepository:
         self.__session.commit()
 
     def archive_expenses(self, expense_ids: list):
+        require_role('superuser')
         if not expense_ids:
             return
         self.__check_expense_ids_are_assigned_in_database(expense_ids)
@@ -125,6 +129,7 @@ class ExpenseRepository:
         )
 
     def update_expense(self, updated_expense: Expense):
+        require_role('superuser')
         self.__check_name_is_not_empty_or_whitespaces(updated_expense.name)
         self.__check_money_is_positive(updated_expense.spent_money)
         self.__check_expense_ids_are_assigned_in_database([updated_expense.id])

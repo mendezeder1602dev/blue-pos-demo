@@ -2,11 +2,14 @@ import hashlib
 import os
 import secrets
 from datetime import datetime, timedelta
-from sqlalchemy import select
+from sqlalchemy import delete, select
 from model.entity.models import AuthSession, User
 
 
 class UserRepository:
+    MAX_ATTEMPTS = 5
+    LOGIN_LOCK_MINUTES = 15
+    RECOVERY_LOCK_MINUTES = 30
     def __init__(self, session): self.__session = session
     @staticmethod
     def _hash(value, salt=None):
@@ -51,7 +54,29 @@ class UserRepository:
         self.__session.add(user); self.__session.commit(); return user
     def authenticate(self, username, password):
         user = self.__session.scalars(select(User).where(User.username == username)).first()
-        return user if user and self._verify(password, user.password_hash) else None
+        if user is None:
+            hashlib.pbkdf2_hmac('sha256', password.encode(), b'unknown-user', 260000)
+            return None
+        now = datetime.utcnow()
+        if user.login_blocked_until and user.login_blocked_until > now:
+            return None
+        if not self._verify(password, user.password_hash):
+            user.failed_login_attempts = int(user.failed_login_attempts or 0) + 1
+            if user.failed_login_attempts >= self.MAX_ATTEMPTS:
+                user.login_blocked_until = now + timedelta(minutes=self.LOGIN_LOCK_MINUTES)
+                user.failed_login_attempts = 0
+            self.__session.commit()
+            return None
+        user.failed_login_attempts = 0
+        user.login_blocked_until = None
+        self.__session.commit()
+        return user
+
+    def login_block_seconds(self, username):
+        user = self.__session.scalars(select(User).where(User.username == username)).first()
+        if not user or not user.login_blocked_until:
+            return 0
+        return max(0, int((user.login_blocked_until - datetime.utcnow()).total_seconds()))
     def create_session(self, user, duration_hours=12):
         token = secrets.token_urlsafe(32)
         session = AuthSession(
@@ -88,6 +113,26 @@ class UserRepository:
             self.__session.commit()
     def reset_password(self, username, recovery_code, password):
         user = self.__session.scalars(select(User).where(User.username == username)).first()
-        if not user or not self._verify(recovery_code, user.recovery_hash): raise ValueError('Datos de recuperación incorrectos.')
+        now = datetime.utcnow()
+        if user and user.recovery_blocked_until and user.recovery_blocked_until > now:
+            remaining = int((user.recovery_blocked_until - now).total_seconds())
+            raise ValueError(f'Recuperación bloqueada temporalmente. Intenta de nuevo en {max(1, remaining // 60 + 1)} minutos.')
+        if not user:
+            hashlib.pbkdf2_hmac('sha256', recovery_code.encode(), b'unknown-user', 260000)
+            raise ValueError('Datos de recuperación incorrectos.')
+        if not self._verify(recovery_code, user.recovery_hash):
+            user.failed_recovery_attempts = int(user.failed_recovery_attempts or 0) + 1
+            if user.failed_recovery_attempts >= self.MAX_ATTEMPTS:
+                user.recovery_blocked_until = now + timedelta(minutes=self.RECOVERY_LOCK_MINUTES)
+                user.failed_recovery_attempts = 0
+            self.__session.commit()
+            raise ValueError('Datos de recuperación incorrectos.')
         if len(password) < 8: raise ValueError('La contraseña debe tener al menos 8 caracteres.')
-        user.password_hash = self._hash(password); self.__session.commit()
+        user.password_hash = self._hash(password)
+        user.credential_version = int(user.credential_version or 0) + 1
+        user.failed_login_attempts = 0
+        user.failed_recovery_attempts = 0
+        user.login_blocked_until = None
+        user.recovery_blocked_until = None
+        self.__session.execute(delete(AuthSession).where(AuthSession.user_id == user.id))
+        self.__session.commit()
