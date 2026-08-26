@@ -66,6 +66,7 @@ from model.report.exports import (
 )
 from model.report.ticket import generate_thermal_ticket_bytes as _generate_thermal_ticket_bytes
 from model.util.monetary_types import CUPMoney
+from model.timezone import mexico_now, mexico_today
 
 LOW_STOCK_THRESHOLD = 5
 PAYMENT_METHODS = ('Efectivo', 'Transferencia', 'Tarjeta')
@@ -428,8 +429,23 @@ def _queue_activity_notice(title, detail, tone='success', icon=':material/check_
     actor = _actor_name() if st.session_state.get('user') is not None else 'Sistema'
     st.session_state['activity_notice'] = {
         'title': str(title), 'detail': str(detail), 'tone': tone, 'icon': icon,
-        'actor': actor, 'created_at': datetime.now().strftime('%d/%m/%Y %H:%M'),
+        'actor': actor, 'created_at': mexico_now().strftime('%d/%m/%Y %H:%M'),
     }
+
+
+def _form_version(scope):
+    """Devuelve una versión para construir claves de una captura operativa."""
+    return st.session_state.setdefault(f'_form_version_{scope}', 0)
+
+
+def _reset_form(scope):
+    """Presenta widgets nuevos y limpios después de guardar correctamente.
+
+    Cambiar las claves evita modificar el estado de widgets ya renderizados, algo que
+    Streamlit no permite. En errores de validación no se llama para conservar los datos.
+    """
+    state_key = f'_form_version_{scope}'
+    st.session_state[state_key] = st.session_state.get(state_key, 0) + 1
 
 
 def _render_activity_notice():
@@ -629,8 +645,8 @@ def _inventory_export_rows(products):
 
 def _render_dashboard():
     _hero('Centro de operación', 'Ventas, inventario y resultados del negocio en una sola vista.')
-    summary = RepositoryFactory.get_economic_summary_repository().get_economic_summary_on_day(date.today())
-    today_summary = _summary_for_range(date.today(), date.today())
+    summary = RepositoryFactory.get_economic_summary_repository().get_economic_summary_on_day(mexico_today())
+    today_summary = _summary_for_range(mexico_today(), mexico_today())
     catalog_products = [
         product for product in RepositoryFactory.get_product_repository().get_all_products()
         if not product.is_temporary
@@ -709,15 +725,15 @@ def _render_dashboard():
             alert_columns[0].download_button(
                 'Alertas en PDF',
                 generate_pdf_bytes(business, 'Alertas de inventario',
-                                   f'Corte al {date.today()}', inventory_sections),
-                f'alertas-inventario-{date.today()}.pdf', 'application/pdf',
+                                   f'Corte al {mexico_today()}', inventory_sections),
+                f'alertas-inventario-{mexico_today()}.pdf', 'application/pdf',
                 icon=':material/picture_as_pdf:', width='stretch',
             )
             alert_columns[1].download_button(
                 'Alertas en Excel',
                 generate_excel_bytes(business, 'Alertas de inventario',
-                                     f'Corte al {date.today()}', inventory_sections),
-                f'alertas-inventario-{date.today()}.xlsx',
+                                     f'Corte al {mexico_today()}', inventory_sections),
+                f'alertas-inventario-{mexico_today()}.xlsx',
                 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
                 icon=':material/table_view:', width='stretch',
             )
@@ -796,7 +812,7 @@ def _actor_name():
     user = st.session_state.get('user')
     if user is not None and not _is_administrator():
         try:
-            opening = RepositoryFactory.get_cash_control_repository().get_opening(date.today())
+            opening = RepositoryFactory.get_cash_control_repository().get_opening(mexico_today())
             if opening and (opening.shift_responsible or '').strip():
                 return opening.shift_responsible.strip()
         except Exception:
@@ -832,6 +848,7 @@ def _render_sales():
         return
     st.session_state.setdefault('pos_cart', {})
     st.session_state.setdefault('pos_cart_prices', {})
+    checkout_version = _form_version('checkout')
     repository = RepositoryFactory.get_product_repository()
     products = [product for product in repository.get_all_products() if not product.is_temporary]
     available = [product for product in products if product.quantity > 0]
@@ -898,7 +915,8 @@ def _render_sales():
         st.markdown('<div class="pos-section">CATÁLOGO</div>', unsafe_allow_html=True)
         search = st.text_input(
             'Buscar productos', placeholder='Buscar por nombre o código de barras',
-            icon=':material/search:', label_visibility='collapsed', key='pos_search',
+            icon=':material/search:', label_visibility='collapsed',
+            key=f'pos_search_{checkout_version}',
         ).strip().lower()
         exact_barcode = next((product for product in available
                               if search and (product.barcode or '').lower() == search), None)
@@ -908,7 +926,8 @@ def _render_sales():
                 f'Código reconocido: {exact_barcode.name} · {_mxn(exact_barcode.price.amount)}',
                 icon=':material/barcode_scanner:')
             if st.button('Agregar producto escaneado', type='primary', width='stretch',
-                         icon=':material/add_shopping_cart:', key='add_exact_barcode'):
+                         icon=':material/add_shopping_cart:',
+                         key=f'add_exact_barcode_{checkout_version}'):
                 if current_scanned < exact_barcode.quantity:
                     _set_cart_quantity(
                         exact_barcode.id, current_scanned + 1,
@@ -920,10 +939,10 @@ def _render_sales():
         filter_columns = st.columns(2)
         stock_filter = filter_columns[0].selectbox(
             'Mostrar', ('Todos', 'Stock suficiente', 'Por agotarse', 'En el carrito'),
-            key='pos_stock_filter')
+            key=f'pos_stock_filter_{checkout_version}')
         sort_order = filter_columns[1].selectbox(
             'Ordenar', ('Nombre A–Z', 'Menor precio', 'Mayor precio', 'Menor existencia'),
-            key='pos_sort_order')
+            key=f'pos_sort_order_{checkout_version}')
         filtered = [
             product for product in available
             if not search or search in product.name.lower()
@@ -1055,14 +1074,16 @@ def _render_sales():
                 customers = RepositoryFactory.get_operations_repository().get_customers()
                 customer_options = ['Público general'] + [customer.name for customer in customers]
                 sale_customer = st.selectbox(
-                    'Cliente', customer_options, key='checkout_customer',
+                    'Cliente', customer_options,
+                    key=f'checkout_customer_{checkout_version}',
                     help='Opcional. Administración puede registrar clientes desde el menú Clientes.')
-                payment_method, payment_details, payment_error = _payment_controls('checkout', total)
-                sale_date = date.today()
+                payment_method, payment_details, payment_error = _payment_controls(
+                    f'checkout_{checkout_version}', total)
+                sale_date = mexico_today()
                 st.caption(f'Fecha y jornada de venta: {sale_date}')
                 submitted = st.button(
                     f'Cobrar {_mxn(total)}', type='primary', width='stretch',
-                    icon=':material/payments:', key='checkout_submit',
+                    icon=':material/payments:', key=f'checkout_submit_{checkout_version}',
                 )
 
                 clear_column, suspend_column = st.columns(2)
@@ -1071,7 +1092,7 @@ def _render_sales():
                     st.rerun()
                 if suspend_column.button('Venta en espera', width='stretch',
                                          icon=':material/pause_circle:'):
-                    label = f'Espera {datetime.now():%H:%M} · {item_count} artículos'
+                    label = f'Espera {mexico_now():%H:%M} · {item_count} artículos'
                     RepositoryFactory.get_operations_repository().hold_sale(
                         label, '', _actor_name(), cart, {
                             product_id: st.session_state.pos_cart_prices.get(
@@ -1083,6 +1104,7 @@ def _render_sales():
                         'Venta guardada en espera',
                         f'El carrito con {item_count} artículo(s) quedó reservado para '
                         'continuarlo después.', icon=':material/pause_circle:')
+                    _reset_form('checkout')
                     st.rerun()
 
                 if submitted:
@@ -1114,6 +1136,7 @@ def _render_sales():
                             f'Folio {_sale_folio(inserted[0].id)} · {item_count} '
                             f'artículo(s) · {_mxn(total)} · {payment_method}.',
                             icon=':material/receipt_long:')
+                        _reset_form('checkout')
                         st.rerun()
                     except Exception as error:
                         st.error(f'No se pudo completar la venta: {error}')
@@ -1343,18 +1366,18 @@ def _render_inventory_downloads(products, key_prefix, include_cost):
     }]
     sections = [('Resumen', summary), ('Inventario', rows)]
     business = _business_export_data()
-    subtitle = f'Inventario actualizado al {date.today()}'
+    subtitle = f'Inventario actualizado al {mexico_today()}'
     columns = st.columns(2)
     columns[0].download_button(
         'Descargar inventario PDF',
         generate_pdf_bytes(business, 'Reporte de inventario', subtitle, sections),
-        f'inventario-{date.today()}.pdf', 'application/pdf',
+        f'inventario-{mexico_today()}.pdf', 'application/pdf',
         key=f'{key_prefix}_inventory_pdf', icon=':material/picture_as_pdf:',
         width='stretch')
     columns[1].download_button(
         'Descargar inventario Excel',
         generate_excel_bytes(business, 'Reporte de inventario', subtitle, sections),
-        f'inventario-{date.today()}.xlsx',
+        f'inventario-{mexico_today()}.xlsx',
         'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
         key=f'{key_prefix}_inventory_excel', icon=':material/table_view:',
         width='stretch')
@@ -1455,8 +1478,15 @@ def _render_inventory():
     _render_inventory_downloads(products, 'admin', include_cost=True)
 
     with st.expander('Editar o dar de baja un producto'):
+        inventory_admin_version = _form_version('inventory_admin')
         names = [p.name for p in products]
-        selected_name = st.selectbox('Selecciona un producto', names, key='inventory_edit_select')
+        selected_name = st.selectbox(
+            'Selecciona un producto', names, index=None,
+            placeholder='Elige el producto que deseas administrar',
+            key=f'inventory_edit_select_{inventory_admin_version}')
+        if selected_name is None:
+            st.caption('Selecciona un producto para editarlo o darlo de baja.')
+            return
         product = next(p for p in products if p.name == selected_name)
         with st.form(f'edit_product_form_{product.id}', enter_to_submit=False):
             name = st.text_input('Nombre', value=product.name)
@@ -1511,6 +1541,7 @@ def _render_inventory():
                     f'Se actualizó “{name.strip()}”. Categoría: {clean_category}; '
                     f'proveedor: {clean_supplier or "sin proveedor"}.',
                     icon=':material/edit_square:')
+                _reset_form('inventory_admin')
                 st.rerun()
             except (UniqueProductNameException, UniqueProductBarcodeException) as error:
                 st.warning(str(error), icon=':material/content_copy:')
@@ -1539,6 +1570,7 @@ def _render_inventory():
                     f'“{product.name}” ya no aparece en ventas ni en el catálogo. '
                     'Su historial permanece disponible para auditoría.',
                     tone='warning', icon=':material/inventory_2:')
+                _reset_form('inventory_admin')
                 st.rerun()
             except Exception as error:
                 st.error(f'No fue posible dar de baja el producto: {error}',
@@ -1596,6 +1628,9 @@ def _render_inventory_movements():
 
     entry_tab, loss_tab, count_tab, history_tab = st.tabs(
         ('Entradas', 'Mermas y salidas', 'Conteo físico', 'Historial'))
+    entry_version = _form_version('inventory_entry')
+    loss_version = _form_version('inventory_loss')
+    count_version = _form_version('inventory_count')
 
     with entry_tab:
         st.markdown('### :material/add_box: Registrar entrada')
@@ -1604,8 +1639,9 @@ def _render_inventory_movements():
             'La existencia solo cambia al presionar Registrar entrada.')
         only_out = st.toggle(
             'Mostrar solamente productos agotados', value=out_of_stock > 0,
-            key='entry_only_out_of_stock')
-        selected = _movement_product_selector(products, 'entry', only_out)
+            key=f'entry_only_out_of_stock_{entry_version}')
+        selected = _movement_product_selector(
+            products, f'entry_{entry_version}', only_out)
         if selected is not None:
             current_cost = float(selected.cost.amount)
             with st.container(border=True):
@@ -1618,21 +1654,22 @@ def _render_inventory_movements():
                 entry_type = st.selectbox(
                     'Tipo de entrada',
                     ('Compra a proveedor', 'Devolución de cliente', 'Corrección positiva'),
-                    key='entry_type')
+                    key=f'entry_type_{entry_version}')
                 quantity = st.number_input(
                     'Unidades recibidas *', min_value=1, value=1, step=1,
-                    key='entry_quantity')
+                    key=f'entry_quantity_{entry_version}')
                 purchase_cost = None
                 update_average = False
                 if entry_type == 'Compra a proveedor':
                     purchase_cost = st.number_input(
                         'Costo unitario de esta compra (MXN) *', min_value=0.01,
                         value=max(0.01, current_cost), step=1.0, format='%.2f',
-                        key='entry_unit_cost')
+                        key=f'entry_unit_cost_{entry_version}')
                     cost_policy = st.segmented_control(
                         'Tratamiento del costo',
                         ('Actualizar costo promedio', 'Conservar costo registrado'),
-                        default='Actualizar costo promedio', key='entry_cost_policy',
+                        default='Actualizar costo promedio',
+                        key=f'entry_cost_policy_{entry_version}',
                         help='El costo promedio pondera las existencias actuales y la nueva compra.')
                     update_average = cost_policy == 'Actualizar costo promedio'
                     st.metric('Importe de la compra', _mxn(float(purchase_cost) * int(quantity)))
@@ -1641,17 +1678,18 @@ def _render_inventory_movements():
                     f'Existencia después del movimiento: **{resulting_stock} unidades**.',
                     icon=':material/trending_up:')
                 movement_date = st.date_input(
-                    'Fecha del movimiento', value=date.today(), max_value=date.today(),
-                    key='entry_date')
+                    'Fecha del movimiento', value=mexico_today(), max_value=mexico_today(),
+                    key=f'entry_date_{entry_version}')
                 reference = st.text_input(
-                    'Factura, remisión o referencia', key='entry_reference',
+                    'Factura, remisión o referencia',
+                    key=f'entry_reference_{entry_version}',
                     placeholder='Ejemplo: FAC-1025')
                 reason = st.text_area(
-                    'Observaciones *', key='entry_reason',
+                    'Observaciones *', key=f'entry_reason_{entry_version}',
                     placeholder='Describe la recepción o el motivo de la corrección')
                 if st.button(
                         'Registrar entrada', type='primary', icon=':material/add_box:',
-                        width='stretch', key='submit_inventory_entry'):
+                        width='stretch', key=f'submit_inventory_entry_{entry_version}'):
                     if len(reason.strip()) < 5:
                         st.error(
                             'Escribe una observación de al menos 5 caracteres.',
@@ -1668,6 +1706,7 @@ def _render_inventory_movements():
                                 f'Se agregaron {int(quantity)} unidad(es) de “{selected.name}”. '
                                 f'Nueva existencia: {updated.quantity} unidades.',
                                 icon=':material/add_box:')
+                            _reset_form('inventory_entry')
                             st.rerun()
                         except Exception as error:
                             st.error(f'No se registró la entrada: {error}',
@@ -1679,7 +1718,8 @@ def _render_inventory_movements():
             'Documenta productos dañados, caducados, perdidos o utilizados internamente. '
             'Nunca se permiten existencias negativas.')
         available = [product for product in products if product.quantity > 0]
-        selected = _movement_product_selector(available, 'loss') if available else None
+        selected = _movement_product_selector(
+            available, f'loss_{loss_version}') if available else None
         if not available:
             st.info('No hay productos con existencia disponible para registrar una merma.',
                     icon=':material/info:')
@@ -1691,7 +1731,7 @@ def _render_inventory_movements():
                     'Valor al costo', _mxn(float(selected.cost.amount) * selected.quantity))
                 quantity = st.number_input(
                     'Unidades a descontar *', min_value=1, max_value=selected.quantity,
-                    value=1, step=1, key='loss_quantity')
+                    value=1, step=1, key=f'loss_quantity_{loss_version}')
                 resulting_stock = selected.quantity - int(quantity)
                 st.warning(
                     f'Existencia después de la merma: **{resulting_stock} unidades**.',
@@ -1699,23 +1739,25 @@ def _render_inventory_movements():
                 loss_reason = st.selectbox(
                     'Motivo de la merma *',
                     ('Daño', 'Caducidad', 'Pérdida', 'Robo', 'Consumo interno',
-                     'Devolución a proveedor', 'Error de inventario'), key='loss_type')
+                     'Devolución a proveedor', 'Error de inventario'),
+                    key=f'loss_type_{loss_version}')
                 movement_date = st.date_input(
-                    'Fecha del movimiento', value=date.today(), max_value=date.today(),
-                    key='loss_date')
+                    'Fecha del movimiento', value=mexico_today(), max_value=mexico_today(),
+                    key=f'loss_date_{loss_version}')
                 reference = st.text_input(
-                    'Referencia o evidencia', key='loss_reference',
+                    'Referencia o evidencia', key=f'loss_reference_{loss_version}',
                     placeholder='Ejemplo: ACTA-004')
                 notes = st.text_area(
-                    'Explicación *', key='loss_notes',
+                    'Explicación *', key=f'loss_notes_{loss_version}',
                     placeholder='Explica qué ocurrió y quién lo verificó')
                 confirm = st.checkbox(
                     f'Confirmo el descuento de {int(quantity)} unidad(es)',
-                    key='loss_confirm')
+                    key=f'loss_confirm_{loss_version}')
                 if st.button(
                         'Registrar merma', type='primary',
                         icon=':material/production_quantity_limits:', width='stretch',
-                        disabled=not confirm, key='submit_inventory_loss'):
+                        disabled=not confirm,
+                        key=f'submit_inventory_loss_{loss_version}'):
                     if len(notes.strip()) < 5:
                         st.error(
                             'Escribe una explicación de al menos 5 caracteres.',
@@ -1733,6 +1775,7 @@ def _render_inventory_movements():
                                 f'{updated.quantity} unidades.',
                                 tone='warning',
                                 icon=':material/production_quantity_limits:')
+                            _reset_form('inventory_loss')
                             st.rerun()
                         except Exception as error:
                             st.error(f'No se registró la merma: {error}',
@@ -1741,11 +1784,12 @@ def _render_inventory_movements():
     with count_tab:
         st.markdown('### :material/fact_check: Conciliar existencia')
         st.caption('Captura lo contado físicamente. El sistema registrará solamente la diferencia.')
-        selected = _movement_product_selector(products, 'physical_count')
+        selected = _movement_product_selector(
+            products, f'physical_count_{count_version}')
         if selected is not None:
             counted = st.number_input(
                 'Unidades contadas *', min_value=0, value=int(selected.quantity), step=1,
-                key='physical_count_quantity')
+                key=f'physical_count_quantity_{count_version}')
             difference = int(counted) - selected.quantity
             metrics = st.columns(3)
             metrics[0].metric('En sistema', selected.quantity)
@@ -1753,11 +1797,15 @@ def _render_inventory_movements():
             metrics[2].metric('Diferencia', f'{difference:+d}')
             count_reason = st.text_area(
                 'Explicación del ajuste *',
-                placeholder='Conteo cíclico, inventario general o corrección verificada')
-            confirm_count = st.checkbox('Confirmo que realicé el conteo físico.')
+                placeholder='Conteo cíclico, inventario general o corrección verificada',
+                key=f'physical_count_reason_{count_version}')
+            confirm_count = st.checkbox(
+                'Confirmo que realicé el conteo físico.',
+                key=f'physical_count_confirm_{count_version}')
             if st.button(
                     'Conciliar existencia', type='primary', icon=':material/fact_check:',
-                    width='stretch', disabled=not confirm_count or difference == 0):
+                    width='stretch', disabled=not confirm_count or difference == 0,
+                    key=f'physical_count_submit_{count_version}'):
                 if len(count_reason.strip()) < 5:
                     st.error('Explica el ajuste con al menos 5 caracteres.', icon=':material/error:')
                 else:
@@ -1765,11 +1813,12 @@ def _render_inventory_movements():
                         previous_count = selected.quantity
                         updated = RepositoryFactory.get_operations_repository().adjust_stock(
                             selected.id, difference, 'Conteo físico', count_reason.strip(),
-                            _actor_name(), f'CONTEO-{date.today()}')
+                            _actor_name(), f'CONTEO-{mexico_today()}')
                         _queue_activity_notice(
                             'Existencia conciliada',
                             f'“{selected.name}” pasó de {previous_count} a '
                             f'{updated.quantity} unidad(es).', icon=':material/fact_check:')
+                        _reset_form('inventory_count')
                         st.rerun()
                     except Exception as error:
                         st.error(f'No se pudo conciliar: {error}', icon=':material/error:')
@@ -1837,6 +1886,7 @@ def _render_express_sale():
           'VENDEDOR · COBRO RÁPIDO')
     if not _require_open_cash_for_sale():
         return
+    express_version = _form_version('express_sale')
     st.info('La venta aparecerá en reportes. Solo se agregará al inventario si lo indicas.',
             icon=':material/bolt:')
 
@@ -1897,23 +1947,33 @@ def _render_express_sale():
                 'application/pdf', key='express_ticket_excel',
                 icon=':material/receipt_long:', width='stretch',
             )
-    name = st.text_input('Artículo o servicio', placeholder='Ej. Entrega especial')
+    name = st.text_input(
+        'Artículo o servicio', placeholder='Ej. Entrega especial',
+        key=f'express_name_{express_version}')
     columns = st.columns(3)
-    quantity = columns[0].number_input('Cantidad', min_value=1, value=1, step=1)
+    quantity = columns[0].number_input(
+        'Cantidad', min_value=1, value=1, step=1,
+        key=f'express_quantity_{express_version}')
     unit_price = columns[1].number_input('Precio unitario (MXN)', min_value=0.01, value=1.0,
-                                         step=1.0, format='%.2f')
+                                         step=1.0, format='%.2f',
+                                         key=f'express_price_{express_version}')
     unit_cost = columns[2].number_input('Costo unitario (MXN)', min_value=0.0, value=0.0,
-                                        step=1.0, format='%.2f')
-    add_to_inventory = st.toggle('Agregar este artículo al inventario')
+                                        step=1.0, format='%.2f',
+                                        key=f'express_cost_{express_version}')
+    add_to_inventory = st.toggle(
+        'Agregar este artículo al inventario',
+        key=f'express_add_inventory_{express_version}')
     remaining_stock = st.number_input(
         'Unidades que quedarán disponibles después de esta venta', min_value=0,
-        value=0, step=1, disabled=not add_to_inventory)
+        value=0, step=1, disabled=not add_to_inventory,
+        key=f'express_remaining_{express_version}')
     total = int(quantity) * float(unit_price)
     st.markdown(f'<div class="pos-total"><small>TOTAL A COBRAR</small>'
                 f'<strong>{_mxn(total)}</strong></div>', unsafe_allow_html=True)
-    payment_method, payment_details, payment_error = _payment_controls('express', total)
+    payment_method, payment_details, payment_error = _payment_controls(
+        f'express_{express_version}', total)
     submitted = st.button(f'Cobrar {_mxn(total)}', type='primary', width='stretch',
-                          icon=':material/bolt:', key='express_submit')
+                          icon=':material/bolt:', key=f'express_submit_{express_version}')
     if submitted:
         if payment_error:
             st.error(payment_error, icon=':material/error:')
@@ -1924,7 +1984,7 @@ def _render_express_sale():
             return
         try:
             product_name = clean_name if add_to_inventory else \
-                f'Express · {clean_name[:35]} · {datetime.now():%Y%m%d%H%M%S%f}'
+                f'Express · {clean_name[:35]} · {mexico_now():%Y%m%d%H%M%S%f}'
             product = Product(
                 name=product_name, description='Creado desde Venta express',
                 price=CUPMoney(f'{unit_price:.2f}'), cost=CUPMoney(f'{unit_cost:.2f}'),
@@ -1932,14 +1992,14 @@ def _render_express_sale():
                 barcode='', is_temporary=not add_to_inventory)
             RepositoryFactory.get_product_repository().insert_product(product)
             sale = Sale(product_id=product.id, price=product.price, cost=product.cost,
-                        date=date.today(), payment_method=payment_method or 'Efectivo',
+                        date=mexico_today(), payment_method=payment_method or 'Efectivo',
                         payment_details=payment_details)
             inserted_sales = RepositoryFactory.get_sale_repository().insert_sales(
                 sale, int(quantity))
             first_sale = inserted_sales[0]
             st.session_state.express_last_ticket = {
                 'folio': _sale_folio(first_sale.id),
-                'created_at': datetime.now().strftime('%d/%m/%Y %H:%M'),
+                'created_at': mexico_now().strftime('%d/%m/%Y %H:%M'),
                 'name': clean_name,
                 'quantity': int(quantity),
                 'unit_price': float(unit_price),
@@ -1959,6 +2019,7 @@ def _render_express_sale():
                 'Venta express registrada',
                 f'{message} Total cobrado: {_mxn(total)} mediante '
                 f'{payment_method or "Efectivo"}.', icon=':material/bolt:')
+            _reset_form('express_sale')
             st.rerun()
         except (UniqueProductNameException, UniqueProductBarcodeException) as error:
             st.warning(str(error), icon=':material/content_copy:')
@@ -1976,8 +2037,11 @@ def _render_quotes():
     create_tab, history_tab = st.tabs(['Nueva cotización', 'Historial'])
 
     with create_tab:
+        quote_item_version = _form_version('quote_item')
         options = ['Artículo libre'] + [product.name for product in products]
-        source = st.selectbox('Producto del inventario', options, key='quote_product_source')
+        source = st.selectbox(
+            'Producto del inventario', options,
+            key=f'quote_product_source_{quote_item_version}')
         selected = next((product for product in products if product.name == source), None)
         if selected:
             information = st.columns(4)
@@ -1990,7 +2054,8 @@ def _render_quotes():
         else:
             st.caption('El artículo libre no está vinculado al inventario y no puede enviarse a caja.')
 
-        form_key = f"quote_add_item_{selected.id if selected else 'free'}"
+        form_key = (
+            f"quote_add_item_{selected.id if selected else 'free'}_{quote_item_version}")
         with st.form(form_key, border=False, clear_on_submit=True, enter_to_submit=False):
             row = st.columns((2, 1, 1), vertical_alignment='bottom')
             custom_name = row[0].text_input(
@@ -2023,7 +2088,7 @@ def _render_quotes():
                     notice_title = 'Cantidad actualizada en la cotización'
                 else:
                     st.session_state.quote_items.append({
-                        'draft_id': datetime.now().strftime('%Y%m%d%H%M%S%f'),
+                        'draft_id': mexico_now().strftime('%Y%m%d%H%M%S%f'),
                         'product_id': product_id, 'description': description,
                         'quantity': int(quantity), 'unit_price': float(price),
                     })
@@ -2032,6 +2097,7 @@ def _render_quotes():
                     notice_title,
                     f'“{description}” quedó en el borrador. La cotización todavía '
                     'no ha sido guardada.', tone='info', icon=':material/request_quote:')
+                _reset_form('quote_item')
                 st.rerun()
 
         items = st.session_state.quote_items
@@ -2246,13 +2312,15 @@ def _render_expenses():
         st.error('Solo el administrador puede registrar, editar o anular gastos.',
                  icon=':material/admin_panel_settings:')
         return
+    expense_version = _form_version('expense_new')
     with st.expander('Agregar gasto'):
-        with st.form('add_expense_form', clear_on_submit=True, enter_to_submit=False):
-            name = st.text_input('Nombre', key='expense_new_name')
-            description = st.text_area('Descripción', height=68, key='expense_new_description')
+        with st.form(f'add_expense_form_{expense_version}', enter_to_submit=False):
+            name = st.text_input('Nombre', key=f'expense_new_name_{expense_version}')
+            description = st.text_area(
+                'Descripción', height=68, key=f'expense_new_description_{expense_version}')
             spent_money = st.number_input(
                 'Dinero gastado (MXN)', min_value=0.01, step=1.0, format='%.2f',
-                key='expense_new_amount')
+                key=f'expense_new_amount_{expense_version}')
             detail_columns = st.columns(2)
             category = detail_columns[0].selectbox(
                 'Categoría', ('Operación', 'Servicios', 'Renta', 'Nómina', 'Compra',
@@ -2265,7 +2333,8 @@ def _render_expenses():
             affects_cash = st.checkbox(
                 'Descontar este gasto del efectivo de caja', value=payment_method == 'Efectivo',
                 help='Actívalo solo cuando el dinero salió físicamente de la caja.')
-            expense_date = st.date_input('Fecha', value=date.today(), key='expense_new_date')
+            expense_date = st.date_input(
+                'Fecha', value=mexico_today(), key=f'expense_new_date_{expense_version}')
             submitted = st.form_submit_button(
                 'Guardar gasto', type='primary', icon=':material/save:', width='stretch')
         if submitted:
@@ -2283,6 +2352,7 @@ def _render_expenses():
                     'Gasto registrado',
                     f'“{name.strip()}” por {_mxn(spent_money)} quedó incluido en '
                     'reportes y auditoría.', icon=':material/payments:')
+                _reset_form('expense_new')
                 st.rerun()
             except Exception as error:
                 st.error(str(error))
@@ -2304,16 +2374,22 @@ def _render_expenses():
     }, width='stretch', hide_index=True)
 
     with st.expander('Administrar gastos', icon=':material/edit_note:'):
+        expense_admin_version = _form_version('expense_admin')
         options = {
             f'#{expense.id} · {expense.name} · {_mxn(expense.spent_money.amount)}': expense
             for expense in expenses
         }
         selected_label = st.selectbox(
-            'Selecciona un gasto', list(options), key='expense_admin_selection')
+            'Selecciona un gasto', list(options), index=None,
+            placeholder='Elige el gasto que deseas administrar',
+            key=f'expense_admin_selection_{expense_admin_version}')
+        if selected_label is None:
+            st.caption('Selecciona un gasto para editarlo o anularlo.')
+            return
         selected_expense = options[selected_label]
         action = st.segmented_control(
             'Acción', ('Editar', 'Anular'), default='Editar',
-            key='expense_admin_action') or 'Editar'
+            key=f'expense_admin_action_{expense_admin_version}') or 'Editar'
 
         if action == 'Editar':
             with st.form(f'edit_expense_form_{selected_expense.id}', enter_to_submit=False):
@@ -2367,6 +2443,7 @@ def _render_expenses():
                         f'El gasto #{selected_expense.id} ahora corresponde a '
                         f'“{edited_name.strip()}” por {_mxn(edited_amount)}.',
                         icon=':material/edit_square:')
+                    _reset_form('expense_admin')
                     st.rerun()
                 except Exception as error:
                     st.error(str(error), icon=':material/error:')
@@ -2391,6 +2468,7 @@ def _render_expenses():
                     f'El gasto #{selected_expense.id} “{selected_expense.name}” fue '
                     'retirado de los registros activos; la evidencia se conserva.',
                     tone='warning', icon=':material/delete:')
+                _reset_form('expense_admin')
                 st.rerun()
 
 
@@ -2429,8 +2507,32 @@ def _summary_for_range(initial_date: date, final_date: date):
     }
 
 
-def _cash_close_summary(close_date: date):
+def _cash_close_summary(close_date: date, opening=None, closed_at=None):
+    """Resume el día completo o exclusivamente el intervalo de un turno."""
     result = _summary_for_range(close_date, close_date)
+    if opening is not None:
+        start_at = opening.created_at
+
+        def belongs_to_shift(record):
+            created_at = getattr(record, 'created_at', None)
+            if created_at is None:
+                return True  # Compatibilidad con registros históricos sin hora.
+            return created_at >= start_at and (closed_at is None or created_at <= closed_at)
+
+        sales = [sale for sale in result['sales'] if belongs_to_shift(sale)]
+        expenses = [expense for expense in result['expenses'] if belongs_to_shift(expense)]
+        acquired_money = economy.calculate_collected_money(sales)
+        total_profit = economy.calculate_total_profit(sales)
+        total_expense = CUPMoney('0')
+        for expense in expenses:
+            total_expense += expense.spent_money
+        result.update({
+            'sale_quantity': len({sale.transaction_id or f'legacy-{sale.id}' for sale in sales}),
+            'unit_quantity': len(sales), 'acquired_money': acquired_money,
+            'total_cost': acquired_money - total_profit, 'total_profit': total_profit,
+            'total_expense': total_expense, 'net_profit': total_profit - total_expense,
+            'sales': sales, 'expenses': expenses,
+        })
     totals = {'Efectivo': 0.0, 'Tarjeta': 0.0, 'Transferencia': 0.0, 'Otros': 0.0}
     operations = set()
     for sale in result['sales']:
@@ -2527,15 +2629,9 @@ def _render_cash_summary_cards(items):
 
 def _require_open_cash_for_sale():
     control_repository = RepositoryFactory.get_cash_control_repository()
-    close_repository = RepositoryFactory.get_cash_close_repository()
-    opening = control_repository.get_opening(date.today())
-    cash_close = close_repository.get_by_date(date.today())
+    opening = control_repository.get_opening(mexico_today())
     if opening is None:
         st.warning('La caja aún no está abierta. Ve a Apertura de caja antes de registrar ventas.',
-                   icon=':material/lock:')
-        return False
-    if cash_close is not None:
-        st.warning('La caja de hoy ya fue cerrada. No se pueden registrar más ventas.',
                    icon=':material/lock:')
         return False
     return True
@@ -2545,21 +2641,25 @@ def _render_cash_opening():
     _hero('Apertura de caja',
           'Verifica el fondo de cambio y habilita la jornada con un conteo auditable.',
           'CAJA · INICIO DE JORNADA')
-    selected_date = st.date_input('Fecha de apertura', value=date.today(),
+    selected_date = st.date_input('Fecha de apertura', value=mexico_today(),
                                   key='cash_opening_date')
     user = st.session_state['user']
     is_admin = _is_administrator()
     control_repository = RepositoryFactory.get_cash_control_repository()
     close_repository = RepositoryFactory.get_cash_close_repository()
     opening = control_repository.get_opening(selected_date)
-    existing_close = close_repository.get_by_date(selected_date)
-    previous_close = close_repository.get_latest_before(selected_date)
-    result, payment_totals, _ = _cash_close_summary(selected_date)
-    movements = control_repository.get_movements(selected_date)
-    movement_totals = control_repository.totals_for_date(selected_date)
+    openings_today = control_repository.get_openings(selected_date)
+    existing_close = close_repository.get_for_opening(opening.id) if opening else None
+    previous_close = close_repository.get_latest()
+    result, payment_totals, _ = _cash_close_summary(selected_date, opening)
+    movements = control_repository.get_movements(
+        selected_date, opening.id if opening else None)
+    movement_totals = control_repository.totals_for_date(
+        selected_date, opening.id if opening else None)
+    form_key = f'{selected_date}_turno_{len(openings_today) + 1}'
 
     if opening is None:
-        if selected_date != date.today():
+        if selected_date != mexico_today():
             st.info('No existe una apertura registrada para esta fecha.',
                     icon=':material/history:')
             return
@@ -2567,11 +2667,6 @@ def _render_cash_opening():
             st.warning('La caja está cerrada. Solicita al administrador que confirme la apertura.',
                        icon=':material/admin_panel_settings:')
             return
-        if existing_close is not None:
-            st.error('Esta jornada ya fue cerrada y no puede volver a abrirse.',
-                     icon=':material/lock:')
-            return
-
         suggested_amount = 0.0
         suggested_details = {}
         source_close_id = None
@@ -2591,14 +2686,14 @@ def _render_cash_opening():
         default_mode = 'Por denominaciones' if suggested_details else 'Importe manual'
         count_mode = st.segmented_control(
             'Forma de captura', ('Por denominaciones', 'Importe manual'),
-            default=default_mode, key=f'opening_count_mode_{selected_date}')
+            default=default_mode, key=f'opening_count_mode_{form_key}')
         if count_mode == 'Por denominaciones':
             opening_amount, denomination_details = _render_cash_denominations(
-                f'opening_denomination_{selected_date}', suggested_details)
+                f'opening_denomination_{form_key}', suggested_details)
         else:
             opening_amount = st.number_input(
                 'Fondo inicial para cambio (MXN)', min_value=0.0, value=suggested_amount,
-                step=100.0, format='%.2f', key=f'cash_opening_amount_{selected_date}')
+                step=100.0, format='%.2f', key=f'cash_opening_amount_{form_key}')
             denomination_details = {}
 
         if previous_close is not None:
@@ -2612,19 +2707,19 @@ def _render_cash_opening():
         opening_columns = st.columns(2)
         shift_responsible = opening_columns[0].text_input(
             'Responsable del turno *', placeholder='Nombre de quien operará la caja',
-            key=f'cash_shift_responsible_{selected_date}')
+            key=f'cash_shift_responsible_{form_key}')
         cash_limit = opening_columns[1].number_input(
             'Límite máximo recomendado en caja (MXN)', min_value=100.0, value=3000.0,
-            step=500.0, format='%.2f', key=f'cash_opening_limit_{selected_date}',
+            step=500.0, format='%.2f', key=f'cash_opening_limit_{form_key}',
             help='Al superar este nivel, el sistema recomendará un retiro de seguridad.')
         opening_notes = st.text_input(
             'Nota de apertura', placeholder='Entrega, retiro previo o incidencia',
-            key=f'cash_opening_notes_{selected_date}')
+            key=f'cash_opening_notes_{form_key}')
         confirmed = st.checkbox(
             'Confirmo que el efectivo fue contado físicamente y entregado a caja.',
-            key=f'cash_opening_confirmed_{selected_date}')
+            key=f'cash_opening_confirmed_{form_key}')
         if st.button('Confirmar apertura', type='primary', icon=':material/lock_open:',
-                     width='stretch', key=f'cash_opening_submit_{selected_date}'):
+                     width='stretch', key=f'cash_opening_submit_{form_key}'):
             if not shift_responsible.strip():
                 st.error('Indica el responsable del turno.', icon=':material/error:')
             elif not confirmed:
@@ -2652,8 +2747,8 @@ def _render_cash_opening():
                         f'#{source_close_id or "ninguno"} · límite {_mxn(cash_limit)} '
                         f'· turno {shift_responsible.strip()}')
                     _queue_activity_notice(
-                        'Caja abierta correctamente',
-                        f'Jornada {selected_date} iniciada con fondo de '
+                        f'Turno {len(openings_today) + 1} abierto correctamente',
+                        f'Caja del {selected_date} iniciada con fondo de '
                         f'{_mxn(opening_amount)}, límite de {_mxn(cash_limit)} y '
                         f'responsable {shift_responsible.strip()}.',
                         icon=':material/lock_open:')
@@ -2684,27 +2779,30 @@ def _render_cash_opening():
                  f'{_mxn(estimated_cash - float(opening.cash_limit.amount))}. '
                  'Conviene realizar un retiro de seguridad.', icon=':material/security:')
 
-    if is_admin and selected_date == date.today() and existing_close is None:
+    if is_admin and selected_date == mexico_today() and existing_close is None:
+        movement_scope = f'cash_movement_{opening.id}'
+        movement_version = _form_version(movement_scope)
         with st.expander('Registrar entrada o retiro autorizado',
                          icon=':material/currency_exchange:'):
             movement_type = st.segmented_control(
                 'Tipo de movimiento', ('Retiro', 'Entrada'), default='Retiro',
-                key=f'cash_movement_type_{selected_date}') or 'Retiro'
+                key=f'cash_movement_type_{opening.id}_{movement_version}') or 'Retiro'
             movement_columns = st.columns(2)
             movement_amount = movement_columns[0].number_input(
                 'Importe (MXN)', min_value=0.01, value=100.0, step=100.0, format='%.2f',
-                key=f'cash_movement_amount_{selected_date}')
+                key=f'cash_movement_amount_{opening.id}_{movement_version}')
             options = (('Retiro de seguridad', 'Pago autorizado', 'Depósito bancario', 'Otro')
                        if movement_type == 'Retiro' else
                        ('Cambio adicional', 'Reintegro', 'Entrada autorizada', 'Otro'))
             category = movement_columns[1].selectbox(
-                'Motivo', options, key=f'cash_movement_reason_category_{selected_date}')
+                'Motivo', options,
+                key=f'cash_movement_reason_category_{opening.id}_{movement_version}')
             detail = st.text_input(
                 'Detalle obligatorio', placeholder='Explica el destino u origen del efectivo',
-                key=f'cash_movement_reason_detail_{selected_date}')
+                key=f'cash_movement_reason_detail_{opening.id}_{movement_version}')
             if st.button('Autorizar movimiento', type='primary',
                          icon=':material/currency_exchange:', width='stretch',
-                         key=f'cash_movement_submit_{selected_date}'):
+                         key=f'cash_movement_submit_{opening.id}_{movement_version}'):
                 if not detail.strip():
                     st.error('Escribe el detalle y destino u origen del dinero.',
                              icon=':material/error:')
@@ -2726,6 +2824,7 @@ def _render_cash_opening():
                             f'{movement_type} por {_mxn(movement_amount)}. Motivo: {reason}.',
                             tone='warning' if movement_type == 'Retiro' else 'success',
                             icon=':material/account_balance_wallet:')
+                        _reset_form(movement_scope)
                         st.rerun()
                     except Exception as error:
                         st.error(str(error), icon=':material/error:')
@@ -2745,21 +2844,23 @@ def _render_cash_close():
     _hero('Corte de caja',
           'Concilia ventas, gastos y efectivo físico con un cierre claro y auditable.',
           'CAJA · CONTROL DIARIO')
-    selected_date = st.date_input('Fecha del corte', value=date.today(), key='cash_close_date')
-    result, payment_totals, operation_count = _cash_close_summary(selected_date)
+    selected_date = st.date_input('Fecha del corte', value=mexico_today(), key='cash_close_date')
+    user = st.session_state['user']
+    is_admin = _is_administrator()
+    repository = RepositoryFactory.get_cash_close_repository()
+    control_repository = RepositoryFactory.get_cash_control_repository()
+    opening = control_repository.get_opening(selected_date)
+    existing_close = repository.get_for_opening(opening.id) if opening else None
+    result, payment_totals, operation_count = _cash_close_summary(selected_date, opening)
     total_sales = sum(payment_totals.values())
     total_expenses = float(result['total_expense'].amount)
     cash_expense_total = sum(
         float(expense.spent_money.amount) for expense in result['expenses']
         if bool(getattr(expense, 'affects_cash', False)))
-    user = st.session_state['user']
-    is_admin = _is_administrator()
-    repository = RepositoryFactory.get_cash_close_repository()
-    control_repository = RepositoryFactory.get_cash_control_repository()
-    existing_close = repository.get_by_date(selected_date)
-    opening = control_repository.get_opening(selected_date)
-    movements = control_repository.get_movements(selected_date)
-    movement_totals = control_repository.totals_for_date(selected_date)
+    movements = control_repository.get_movements(
+        selected_date, opening.id if opening else None)
+    movement_totals = control_repository.totals_for_date(
+        selected_date, opening.id if opening else None)
 
     st.markdown('#### Resumen del sistema')
     _render_cash_summary_cards((
@@ -2773,7 +2874,7 @@ def _render_cash_close():
 
     st.markdown('#### Estado de la jornada')
     if opening is None:
-        if False and is_admin and selected_date == date.today() and existing_close is None:
+        if False and is_admin and selected_date == mexico_today() and existing_close is None:
             opening_columns = st.columns(2)
             opening_amount = opening_columns[0].number_input(
                 'Fondo inicial para cambio', min_value=0.0, value=0.0, step=100.0,
@@ -2806,8 +2907,17 @@ def _render_cash_close():
                 except Exception as error:
                     st.error(str(error), icon=':material/error:')
         elif existing_close is None:
-            st.warning('Primero registra la Apertura de caja desde su opción independiente del menú.',
-                       icon=':material/lock_open:')
+            closes_today = repository.get_for_date(selected_date)
+            if closes_today and selected_date == mexico_today():
+                st.success(
+                    f'No hay un turno activo. Hoy se han cerrado {len(closes_today)} '
+                    f'{"turno" if len(closes_today) == 1 else "turnos"}. '
+                    'Puedes iniciar otro desde Apertura de caja.',
+                    icon=':material/check_circle:')
+            else:
+                st.warning(
+                    'Primero registra la Apertura de caja desde su opción independiente del menú.',
+                    icon=':material/lock_open:')
     else:
         estimated_drawer_cash = (float(opening.opening_amount.amount)
                                  + payment_totals['Efectivo']
@@ -2827,7 +2937,7 @@ def _render_cash_close():
                 'Se recomienda que el administrador realice un retiro de seguridad.',
                 icon=':material/security:')
 
-        if False and is_admin and selected_date == date.today() and existing_close is None:
+        if False and is_admin and selected_date == mexico_today() and existing_close is None:
             with st.expander('Registrar entrada o retiro autorizado',
                              icon=':material/admin_panel_settings:'):
                 movement_type = st.segmented_control(
@@ -2889,18 +2999,18 @@ def _render_cash_close():
     if existing_close is not None:
         st.info(f'El corte de {selected_date} ya fue cerrado por {existing_close.cashier}. '
                 'Se conserva bloqueado para proteger la auditoría.', icon=':material/lock:')
-    elif opening is not None and selected_date == date.today():
+    elif opening is not None and selected_date == mexico_today():
         responsible = st.text_input(
             'Responsable del corte *',
             value=(opening.shift_responsible or getattr(user, 'display_name', '')
                    or getattr(user, 'username', '') or 'Vendedor'),
             disabled=not is_admin,
-            key=f'cash_close_responsible_{selected_date}',
+            key=f'cash_close_responsible_{opening.id}',
         )
         cash_expenses = st.number_input(
             'Gastos pagados desde caja (MXN)', min_value=0.0,
             value=float(cash_expense_total), step=10.0,
-            format='%.2f', key=f'cash_close_expenses_{selected_date}',
+            format='%.2f', key=f'cash_close_expenses_{opening.id}',
             disabled=not is_admin,
             help='Se calcula con los gastos marcados como salida de efectivo. Solo administración puede corregirlo.')
         opening_cash = float(opening.opening_amount.amount)
@@ -2912,14 +3022,14 @@ def _render_cash_close():
 
         use_denominations = st.toggle(
             'Conteo asistido por billetes y monedas', value=True,
-            key=f'cash_close_use_denominations_{selected_date}')
+            key=f'cash_close_use_denominations_{opening.id}')
         if use_denominations:
             counted_cash, denomination_details = _render_cash_denominations(
-                f'cash_close_denomination_{selected_date}')
+                f'cash_close_denomination_{opening.id}')
         else:
             counted_cash = st.number_input(
                 'Efectivo contado (MXN)', min_value=0.0, value=max(0.0, expected_cash),
-                step=100.0, format='%.2f', key=f'cash_close_counted_{selected_date}')
+                step=100.0, format='%.2f', key=f'cash_close_counted_{opening.id}')
             denomination_details = {}
 
         difference = float(counted_cash) - expected_cash
@@ -2941,12 +3051,12 @@ def _render_cash_close():
 
         notes = st.text_area(
             'Observaciones', placeholder='Incidencias, retiros, depósitos o explicación de diferencias',
-            key=f'cash_close_notes_{selected_date}')
+            key=f'cash_close_notes_{opening.id}')
         confirmed = st.checkbox(
             'Confirmo que conté el efectivo y revisé los movimientos del día.',
-            key=f'cash_close_confirmed_{selected_date}')
+            key=f'cash_close_confirmed_{opening.id}')
         if st.button('Cerrar caja', type='primary', icon=':material/point_of_sale:',
-                     width='stretch', key=f'cash_close_submit_{selected_date}'):
+                     width='stretch', key=f'cash_close_submit_{opening.id}'):
             if not responsible.strip():
                 st.error('Indica el responsable del corte.', icon=':material/error:')
             elif not confirmed:
@@ -2955,7 +3065,8 @@ def _render_cash_close():
                 st.error('Explica el sobrante o faltante en Observaciones.', icon=':material/error:')
             else:
                 cash_close = CashClose(
-                    date=selected_date, cashier=responsible.strip(), operation_count=operation_count,
+                    date=selected_date, opening_id=opening.id,
+                    cashier=responsible.strip(), operation_count=operation_count,
                     total_sales=CUPMoney(f'{total_sales:.2f}'),
                     cash_sales=CUPMoney(f"{payment_totals['Efectivo']:.2f}"),
                     card_sales=CUPMoney(f"{payment_totals['Tarjeta']:.2f}"),
@@ -3029,7 +3140,7 @@ def _render_cash_close():
 def _render_reports():
     _hero('Reportes', 'Convierte la operación diaria en información financiera clara y exportable.', 'INTELIGENCIA · RESULTADOS')
     period = st.selectbox('Periodo', ('Día', 'Semana', 'Mes', 'Año', 'Personalizado'))
-    today = date.today()
+    today = mexico_today()
 
     if period == 'Día':
         selected_day = st.date_input('Fecha', value=today)
@@ -3182,7 +3293,7 @@ def _render_statistics():
     """Presenta rentabilidad por día, mes o año con una tendencia agregada en SQL."""
     _hero('Estadísticas', 'Analiza ventas, utilidad y resultado real por día, mes o año.',
           'ANÁLISIS · RENTABILIDAD')
-    today = date.today()
+    today = mexico_today()
     period = st.segmented_control(
         'Periodo de análisis', ('Día', 'Mes', 'Año'), default='Mes',
         selection_mode='single', width='stretch', key='statistics_period') or 'Mes'
@@ -3310,8 +3421,9 @@ def _render_customers():
     _hero('Clientes', 'Conserva datos básicos para atención, cotizaciones y seguimiento comercial.',
           'RELACIÓN · SERVICIO')
     operations = RepositoryFactory.get_operations_repository()
+    customer_version = _form_version('customer_new')
     with st.expander('Registrar cliente', icon=':material/person_add:'):
-        with st.form('customer_form', clear_on_submit=True, enter_to_submit=False):
+        with st.form(f'customer_form_{customer_version}', enter_to_submit=False):
             name = st.text_input('Nombre *')
             columns = st.columns(2)
             phone = columns[0].text_input('Teléfono')
@@ -3327,6 +3439,7 @@ def _render_customers():
                     'Cliente registrado',
                     f'“{customer.name}” quedó disponible para futuras ventas y '
                     'cotizaciones.', icon=':material/person_add:')
+                _reset_form('customer_new')
                 st.rerun()
             except Exception as error:
                 st.error(str(error))
@@ -3343,8 +3456,14 @@ def _render_customers():
         'RFC': customer.tax_id, 'Notas': customer.notes,
     } for customer in visible]), hide_index=True, width='stretch')
     with st.expander('Archivar cliente'):
-        selected = st.selectbox('Cliente', [customer.name for customer in customers],
-                                key='archive_customer_select')
+        customer_admin_version = _form_version('customer_admin')
+        selected = st.selectbox(
+            'Cliente', [customer.name for customer in customers], index=None,
+            placeholder='Selecciona el cliente que deseas archivar',
+            key=f'archive_customer_select_{customer_admin_version}')
+        if selected is None:
+            st.caption('Selecciona un cliente para continuar.')
+            return
         customer = next(customer for customer in customers if customer.name == selected)
         if st.button('Archivar', key='archive_customer_button'):
             operations.archive_customer(customer.id)
@@ -3353,6 +3472,7 @@ def _render_customers():
                 'Cliente archivado',
                 f'“{customer.name}” fue retirado del directorio activo; sus operaciones '
                 'anteriores se conservan.', tone='warning', icon=':material/person_remove:')
+            _reset_form('customer_admin')
             st.rerun()
 
 
@@ -3461,7 +3581,7 @@ def _render_supply():
         assigned_to = document_columns[0].text_input(
             'Responsable de la compra', placeholder='Nombre del trabajador')
         purchase_date = document_columns[1].date_input(
-            'Fecha prevista de compra', value=date.today(), min_value=date.today())
+            'Fecha prevista de compra', value=mexico_today(), min_value=mexico_today())
         general_notes = st.text_area(
             'Indicaciones generales',
             placeholder='Presupuesto autorizado, establecimientos sugeridos o condiciones')
@@ -3479,19 +3599,19 @@ def _render_supply():
     }]
     sections = [('Datos de la compra', document_summary),
                 ('Lista de abastecimiento', selected_rows)]
-    subtitle = f'Lista preparada el {date.today()} · Responsable: {assigned_name}'
+    subtitle = f'Lista preparada el {mexico_today()} · Responsable: {assigned_name}'
     downloads_disabled = bool(validation_errors) or not selected_rows
     export_columns = st.columns(2)
     export_columns[0].download_button(
         'Descargar lista PDF', generate_pdf_bytes(
             business, 'Lista de compra y abastecimiento', subtitle, sections),
-        f'lista-compra-{date.today()}.pdf', 'application/pdf',
+        f'lista-compra-{mexico_today()}.pdf', 'application/pdf',
         icon=':material/picture_as_pdf:', width='stretch',
         disabled=downloads_disabled)
     export_columns[1].download_button(
         'Descargar lista Excel', generate_excel_bytes(
             business, 'Lista de compra y abastecimiento', subtitle, sections),
-        f'lista-compra-{date.today()}.xlsx',
+        f'lista-compra-{mexico_today()}.xlsx',
         'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
         icon=':material/table_view:', width='stretch', disabled=downloads_disabled)
     st.info(
@@ -3553,7 +3673,7 @@ def _render_audit():
                 backup_bytes = backup_database_bytes(RepositoryFactory.active_database_url())
                 st.download_button(
                     'Descargar respaldo completo SQLite', backup_bytes,
-                    f'puntos-eccos-respaldo-{date.today()}.db', 'application/octet-stream',
+                    f'puntos-eccos-respaldo-{mexico_today()}.db', 'application/octet-stream',
                     icon=':material/database:', width='stretch')
             except Exception as error:
                 st.error(f'No fue posible preparar el respaldo: {error}')
@@ -3593,7 +3713,7 @@ def _render_business_profile():
 
     with st.form('business_profile_form', enter_to_submit=False):
         identity_tab, contact_tab, receipt_tab = st.tabs(
-            ('Identidad', 'Contacto y ubicación', 'Tickets y reportes'))
+            ('Identidad', 'Contacto y ubicación', 'Tickets'))
         with identity_tab:
             identity_columns = st.columns(2)
             business_name = identity_columns[0].text_input(
@@ -3645,12 +3765,14 @@ def _render_business_profile():
                 'Régimen fiscal', value=profile.tax_regime or '')
 
         with receipt_tab:
-            st.caption('Estos textos se aplicarán a los nuevos tickets, PDF y archivos Excel.')
+            st.caption(
+                'El encabezado identifica al negocio en sus documentos. El agradecimiento '
+                'se imprime únicamente en tickets de Nueva venta y Venta express.')
             receipt_header = st.text_area(
                 'Encabezado del ticket', value=profile.receipt_header or '', height=80,
                 max_chars=300, placeholder='Promoción, sucursal o mensaje destacado')
             receipt_footer = st.text_area(
-                'Mensaje de agradecimiento',
+                'Mensaje de agradecimiento del ticket',
                 value=profile.receipt_footer or 'Gracias por su compra.', height=80,
                 max_chars=500)
             return_policy = st.text_area(
@@ -3825,7 +3947,7 @@ def _render_catalog_storefront(settings, profile, products, preview=False):
                     if whatsapp_url and product.quantity > 0:
                         st.link_button('Consultar por WhatsApp', whatsapp_url,
                                        icon=':material/chat:', width='stretch')
-    st.caption(f'© {date.today().year} {profile.business_name or "Negocio"} · Catálogo impulsado por Puntos ECCOS')
+    st.caption(f'© {mexico_today().year} {profile.business_name or "Negocio"} · Catálogo impulsado por Puntos ECCOS')
 
 
 def _render_public_catalog(slug):
@@ -3991,9 +4113,11 @@ def _render_catalog_manager():
                         st.image(base64.b64decode(selected_product.catalog_image_data), width=240)
                     except (ValueError, TypeError):
                         pass
+                photo_scope = f'catalog_photo_{selected_product.id}'
+                photo_version = _form_version(photo_scope)
                 image_file = st.file_uploader(
                     'Subir fotografía', type=('png', 'jpg', 'jpeg', 'webp'),
-                    key=f'catalog_photo_{selected_product.id}',
+                    key=f'catalog_photo_{selected_product.id}_{photo_version}',
                     help='Máximo 700 KB. Usa una foto cuadrada, limpia y bien iluminada.')
                 image_buttons = st.columns(2)
                 if image_buttons[0].button('Guardar fotografía', type='primary',
@@ -4012,6 +4136,7 @@ def _render_catalog_manager():
                             'Fotografía guardada',
                             f'La nueva imagen de “{selected_product.name}” ya se utiliza '
                             'en el catálogo.', icon=':material/add_photo_alternate:')
+                        _reset_form(photo_scope)
                         st.rerun()
                     except ValueError as error:
                         st.error(str(error), icon=':material/error:')
@@ -4027,6 +4152,7 @@ def _render_catalog_manager():
                         'Fotografía retirada',
                         f'Se eliminó la imagen de “{selected_product.name}” del catálogo.',
                         tone='warning', icon=':material/hide_image:')
+                    _reset_form(photo_scope)
                     st.rerun()
 
     with preview_tab:
@@ -4040,7 +4166,7 @@ def _render_catalog_manager():
 
 def _render_returns():
     _hero('Devoluciones y reembolsos',
-          'Revierte un ticket completo, repone existencias y conserva la evidencia.',
+          'Devuelve artículos completos o parciales y define su destino con trazabilidad.',
           'VENTAS · POSVENTA')
     if not _is_administrator():
         st.error('Solo administración puede autorizar una devolución.',
@@ -4050,49 +4176,187 @@ def _render_returns():
     transactions = {}
     for sale in sales:
         transactions.setdefault(sale.transaction_id or f'legacy-{sale.id}', []).append(sale)
+    transactions = {
+        transaction_id: [line for line in lines if line.status == 'Completada']
+        for transaction_id, lines in transactions.items()
+        if any(line.status == 'Completada' for line in lines)
+    }
     if not transactions:
-        st.info('No hay tickets disponibles para devolver.', icon=':material/receipt_long:')
+        st.info(
+            'No hay artículos vendidos pendientes de devolución. Las unidades anuladas o '
+            'devueltas ya no requieren otra acción.', icon=':material/receipt_long:')
         return
+    st.info(
+        '**Proceso:** 1. Elige el ticket · 2. Edita cantidades y quita lo que el cliente '
+        'conserva · 3. Decide si cada producto vuelve al stock o se da de baja · '
+        '4. Guarda la selección y autoriza.',
+        icon=':material/info:')
     labels = {}
     for transaction_id, lines in transactions.items():
         total = sum(float(line.price.amount) for line in lines)
         labels[f'Venta {_sale_folio(min(line.id for line in lines))} · '
                f'{lines[0].date} · {_mxn(total)}'] = transaction_id
-    with st.form('return_transaction_form', enter_to_submit=False):
-        selected_label = st.selectbox('Ticket original', list(labels))
-        selected_id = labels[selected_label]
-        selected_sales = transactions[selected_id]
-        st.dataframe(pd.DataFrame([{
-            'Producto': sale.product_name or f'Producto #{sale.product_id}',
-            'Importe': float(sale.price.amount),
-        } for sale in selected_sales]), hide_index=True, width='stretch',
-            column_config={'Importe': st.column_config.NumberColumn(format='$ %.2f MXN')})
+    return_version = _form_version('return_transaction')
+    selected_label = st.selectbox(
+        '1. Ticket original', list(labels), key=f'return_ticket_{return_version}',
+        help='También aparecen tickets con algunas unidades devueltas; sólo podrás elegir las pendientes.')
+    selected_id = labels[selected_label]
+    selected_sales = transactions[selected_id]
+    original_method = selected_sales[0].payment_method or 'Efectivo'
+
+    grouped = {}
+    for sale in sorted(selected_sales, key=lambda item: item.id):
+        group_key = (sale.product_id, sale.product_name, float(sale.price.amount))
+        grouped.setdefault(group_key, []).append(sale)
+    rows = []
+    group_sale_ids = {}
+    for row_number, ((product_id, product_name, unit_price), lines) in enumerate(grouped.items()):
+        group_sale_ids[row_number] = [line.id for line in lines]
+        rows.append({
+            'Devolver': True,
+            'Producto': product_name or f'Producto #{product_id}',
+            'Disponibles': len(lines),
+            'Cantidad': len(lines),
+            'Destino': 'Reintegrar a inventario',
+            'Precio unitario': unit_price,
+        })
+    st.caption('Desmarca **Devolver** para quitar un producto o cambia la cantidad.')
+    edited = st.data_editor(
+        pd.DataFrame(rows), hide_index=True, width='stretch', num_rows='fixed',
+        key=f'return_items_editor_{selected_id}_{return_version}',
+        disabled=('Producto', 'Disponibles', 'Precio unitario'),
+        column_config={
+            'Devolver': st.column_config.CheckboxColumn('Devolver', width='small'),
+            'Producto': st.column_config.TextColumn('Producto', width='large'),
+            'Disponibles': st.column_config.NumberColumn('Máximo', width='small'),
+            'Cantidad': st.column_config.NumberColumn(
+                'Cantidad', min_value=0, step=1, width='small', required=True),
+            'Destino': st.column_config.SelectboxColumn(
+                'Destino del producto',
+                options=('Reintegrar a inventario', 'Dar de baja'), required=True,
+                help='Reintegra sólo artículos aptos para volver a venderse.'),
+            'Precio unitario': st.column_config.NumberColumn(
+                'Precio unitario', format='$ %.2f MXN'),
+        })
+    st.warning(
+        '**Antes de guardar:** reintegra únicamente mercancía completa y vendible. '
+        'Usa **Dar de baja** para productos dañados, incompletos o no aptos; éstos no '
+        'aumentarán la existencia disponible.', icon=':material/inventory:')
+
+    editor_signature = tuple(
+        (bool(row['Devolver']), str(row['Cantidad']), str(row['Destino']))
+        for _, row in edited.iterrows()
+    )
+
+    if st.button('Guardar selección de devolución', type='primary',
+                 icon=':material/save:', width='stretch',
+                 key=f'save_return_selection_{return_version}'):
+        plan = []
+        errors = []
+        for row_number, row in edited.iterrows():
+            if not bool(row['Devolver']):
+                continue
+            raw_quantity = row['Cantidad']
+            quantity = int(raw_quantity) if pd.notna(raw_quantity) else 0
+            maximum = int(row['Disponibles'])
+            if quantity != raw_quantity or quantity < 1 or quantity > maximum:
+                errors.append(
+                    f"{row['Producto']}: la cantidad debe ser un número entero entre 1 y {maximum}.")
+                continue
+            plan.append({
+                'sale_ids': group_sale_ids[row_number][:quantity],
+                'disposition': row['Destino'],
+                'product_name': row['Producto'],
+                'unit_price': float(row['Precio unitario']),
+            })
+        if errors:
+            for error in errors:
+                st.error(error, icon=':material/error:')
+        elif not plan:
+            st.error('Selecciona al menos un artículo para devolver.', icon=':material/checklist:')
+        else:
+            st.session_state['return_draft'] = {
+                'transaction_id': selected_id, 'plan': plan,
+                'editor_signature': editor_signature,
+            }
+            st.success(
+                'Selección guardada. Revisa el resumen y autoriza la devolución.',
+                icon=':material/task_alt:')
+
+    draft = st.session_state.get('return_draft')
+    if (not draft or draft.get('transaction_id') != selected_id
+            or draft.get('editor_signature') != editor_signature):
+        if draft and draft.get('transaction_id') == selected_id:
+            st.warning(
+                'Hay cambios pendientes. Vuelve a guardar la selección para actualizar '
+                'la autorización final.', icon=':material/edit:')
+        st.caption('Guarda la selección para habilitar la autorización final.')
+        return
+    return_plan = draft['plan']
+    selected_ids = {sale_id for group in return_plan for sale_id in group['sale_ids']}
+    sales_by_id = {sale.id: sale for sale in selected_sales}
+    return_total = sum(float(sales_by_id[sale_id].price.amount) for sale_id in selected_ids)
+    restock_count = sum(len(group['sale_ids']) for group in return_plan
+                        if group['disposition'] == 'Reintegrar a inventario')
+    writeoff_count = len(selected_ids) - restock_count
+    _render_cash_summary_cards((
+        ('Unidades a devolver', str(len(selected_ids))),
+        ('Total a reembolsar', _mxn(return_total)),
+        ('Regresan al stock', str(restock_count)),
+        ('Se dan de baja', str(writeoff_count)),
+    ))
+    st.subheader('Autorización final')
+    with st.form(f'return_transaction_form_{return_version}', enter_to_submit=False):
+        refund_options = ('Efectivo', 'Tarjeta', 'Transferencia', 'Vale')
+        suggested_refund = original_method if original_method in refund_options else 'Efectivo'
         refund_method = st.segmented_control(
-            'Forma de reembolso', ('Efectivo', 'Tarjeta', 'Transferencia', 'Vale'),
-            default='Efectivo') or 'Efectivo'
-        reason = st.text_area('Motivo de devolución *',
-                              placeholder='Producto defectuoso, error de venta u otro motivo')
+            'Forma de reembolso', refund_options,
+            default=suggested_refund,
+            help='Por control financiero se recomienda usar el mismo método del cobro original.',
+        ) or suggested_refund
+        reason = st.text_area(
+            'Motivo de devolución *',
+            placeholder='Ejemplo: producto defectuoso confirmado por el encargado',
+            help='Escribe al menos 5 caracteres; este texto quedará en la auditoría.')
         confirmed = st.checkbox(
-            'Confirmo que revisé el ticket y autoricé la reposición al inventario.')
+            'Confirmo cantidades, estado físico, destino de mercancía e importe del reembolso.')
+        st.caption(
+            'Esta acción sólo afectará las unidades seleccionadas y conservará el resto del ticket.')
         submitted = st.form_submit_button(
             'Autorizar devolución', type='primary', icon=':material/assignment_return:',
-            width='stretch', disabled=not confirmed)
+            width='stretch')
     if submitted:
-        try:
-            returned = RepositoryFactory.get_sale_repository().return_transaction(
-                selected_id, reason, refund_method)
-            amount = sum(float(sale.price.amount) for sale in returned)
-            RepositoryFactory.get_operations_repository().audit(
-                'venta_devuelta', _actor_name(), 'sale', selected_id,
-                f'{len(returned)} artículos · {_mxn(amount)} · {refund_method} · {reason}')
-            _queue_activity_notice(
-                'Devolución registrada',
-                f'Se repusieron {len(returned)} artículo(s) y se registró un reembolso '
-                f'de {_mxn(amount)} mediante {refund_method}.',
-                tone='warning', icon=':material/assignment_return:')
-            st.rerun()
-        except Exception as error:
-            st.error(f'No se pudo completar la devolución: {error}', icon=':material/error:')
+        clean_reason = reason.strip()
+        if not confirmed:
+            st.error(
+                'Marca la confirmación del paso 3 para autorizar la devolución.',
+                icon=':material/check_box:')
+        elif len(clean_reason) < 5:
+            st.error(
+                'Escribe un motivo de devolución de al menos 5 caracteres.',
+                icon=':material/edit_note:')
+        else:
+            try:
+                returned = RepositoryFactory.get_sale_repository().return_items(
+                    selected_id, return_plan, clean_reason, refund_method, _actor_name())
+                amount = sum(float(sale.price.amount) for sale in returned)
+                RepositoryFactory.get_operations_repository().audit(
+                    'venta_devuelta', _actor_name(), 'sale', selected_id,
+                    f'{len(returned)} artículos · {_mxn(amount)} · {refund_method} · '
+                    f'{restock_count} a stock · {writeoff_count} de baja · {clean_reason}')
+                _queue_activity_notice(
+                    'Devolución registrada',
+                    f'Reembolso de {_mxn(amount)} mediante {refund_method}. '
+                    f'{restock_count} unidad(es) regresaron al stock y '
+                    f'{writeoff_count} quedaron dadas de baja.',
+                    tone='warning', icon=':material/assignment_return:')
+                st.session_state.pop('return_draft', None)
+                _reset_form('return_transaction')
+                st.rerun()
+            except Exception as error:
+                st.error(
+                    f'No se pudo completar la devolución: {error}',
+                    icon=':material/error:')
 
 
 def _navigate_to_page(target):
@@ -4323,7 +4587,7 @@ def _render_app():
         if st.button('Cerrar sesión', icon=':material/logout:', width='stretch'):
             _log_out()
         st.markdown(
-            f'<div class="sidebar-legal">© {date.today().year} Grupo ECCOS<br>'
+            f'<div class="sidebar-legal">© {mexico_today().year} Grupo ECCOS<br>'
             'Creado y desarrollado en Tabasco, México<br>'
             'Con apoyo tecnológico de Codex<br>Software propietario</div>',
             unsafe_allow_html=True,

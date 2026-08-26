@@ -1,9 +1,10 @@
-from sqlalchemy import select
+from sqlalchemy import exists, select
 
 from datetime import date
 
 from model.entity.models import CashClose, CashMovement, CashOpening
 from model.util.monetary_types import CUPMoney
+from model.timezone import mexico_today
 
 
 class CashControlRepository:
@@ -20,10 +21,10 @@ class CashControlRepository:
 
     def open_day(self, opening: CashOpening, authorized_role: str) -> CashOpening:
         self._require_administrator(authorized_role)
-        if opening.date != date.today():
+        if opening.date != mexico_today():
             raise ValueError('La apertura solo puede registrarse para el día actual.')
         if self.get_opening(opening.date) is not None:
-            raise ValueError(f'La caja de {opening.date} ya fue abierta.')
+            raise ValueError('Ya existe un turno abierto. Ciérralo antes de iniciar otro.')
         if not opening.opened_by.strip():
             raise ValueError('Indica quién autoriza la apertura.')
         opening.shift_responsible = (opening.shift_responsible or 'Vendedor').strip()
@@ -38,13 +39,12 @@ class CashControlRepository:
     def add_movement(self, movement: CashMovement, authorized_role: str,
                      available_cash: float = None) -> CashMovement:
         self._require_administrator(authorized_role)
-        if movement.date != date.today():
+        if movement.date != mexico_today():
             raise ValueError('Los movimientos solo pueden registrarse en la caja del día actual.')
-        if self.get_opening(movement.date) is None:
+        active_opening = self.get_opening(movement.date)
+        if active_opening is None:
             raise ValueError('Primero abre la caja del día.')
-        if self.__session.scalar(
-                select(CashClose).where(CashClose.date == movement.date)) is not None:
-            raise ValueError('La caja ya está cerrada; no admite nuevos movimientos.')
+        movement.opening_id = active_opening.id
         if movement.movement_type not in self.MOVEMENT_TYPES:
             raise ValueError('El tipo de movimiento no es válido.')
         if movement.amount is None or movement.amount <= CUPMoney('0.00'):
@@ -61,19 +61,33 @@ class CashControlRepository:
         return movement
 
     def get_opening(self, opening_date):
+        """Devuelve el turno activo de la fecha, no una apertura ya cerrada."""
         return self.__session.scalar(
-            select(CashOpening).where(CashOpening.date == opening_date)
+            select(CashOpening)
+            .where(
+                CashOpening.date == opening_date,
+                ~exists().where(CashClose.opening_id == CashOpening.id),
+            )
+            .order_by(CashOpening.created_at.desc(), CashOpening.id.desc())
+            .limit(1)
         )
 
-    def get_movements(self, movement_date):
+    def get_openings(self, opening_date):
         return self.__session.scalars(
-            select(CashMovement)
-            .where(CashMovement.date == movement_date)
-            .order_by(CashMovement.created_at.asc(), CashMovement.id.asc())
+            select(CashOpening).where(CashOpening.date == opening_date)
+            .order_by(CashOpening.created_at.asc(), CashOpening.id.asc())
         ).all()
 
-    def totals_for_date(self, movement_date):
+    def get_movements(self, movement_date, opening_id=None):
+        statement = select(CashMovement).where(CashMovement.date == movement_date)
+        if opening_id is not None:
+            statement = statement.where(CashMovement.opening_id == opening_id)
+        return self.__session.scalars(
+            statement.order_by(CashMovement.created_at.asc(), CashMovement.id.asc())
+        ).all()
+
+    def totals_for_date(self, movement_date, opening_id=None):
         totals = {'Retiro': 0.0, 'Entrada': 0.0}
-        for movement in self.get_movements(movement_date):
+        for movement in self.get_movements(movement_date, opening_id):
             totals[movement.movement_type] += float(movement.amount.amount)
         return totals

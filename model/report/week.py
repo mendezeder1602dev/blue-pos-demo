@@ -8,6 +8,7 @@ from model.report.abstract_report import AbstractSaleReport
 from model.repository.expense import ExpenseRepository
 from model.repository.sale import SaleRepository
 from model.repository.sales_grouped_by_product import SalesGroupedByProductRepository
+from model.timezone import mexico_today
 
 
 class WeekSaleReport(AbstractSaleReport):
@@ -35,7 +36,7 @@ class WeekSaleReport(AbstractSaleReport):
         return week_day_date + timedelta(days=6 - week_day_date.weekday())
 
     def get_report_as_html(self) -> str:
-        final_date = date.today() if self._final_date > date.today() else self._final_date
+        final_date = mexico_today() if self._final_date > mexico_today() else self._final_date
 
         report_statistics = self.get_report_statistics()
         total_collected_money = report_statistics.paid_money()

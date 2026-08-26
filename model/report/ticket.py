@@ -12,6 +12,7 @@ from reportlab.lib.units import mm
 from reportlab.pdfbase.pdfmetrics import stringWidth
 from reportlab.pdfgen import canvas
 from xhtml2pdf import pisa
+from model.timezone import mexico_now
 
 
 THERMAL_WIDTHS = (58, 80)
@@ -220,7 +221,7 @@ def generate_ticket_pdf(business: dict, items: Iterable[dict], sale_ids: Iterabl
         items=normalized_items,
         total=f'{total:,.2f}',
         sale_date=sale_date,
-        created_at=datetime.now(),
+        created_at=mexico_now(),
         ticket_number=ticket_number,
         ticket_title=ticket_title,
         payment_method=payment_method,

@@ -10,8 +10,8 @@ class CashCloseRepository:
         self.__session = session
 
     def insert(self, cash_close: CashClose) -> CashClose:
-        if self.get_by_date(cash_close.date) is not None:
-            raise ValueError(f'Ya existe un corte de caja para {cash_close.date}.')
+        if cash_close.opening_id is not None and self.get_for_opening(cash_close.opening_id):
+            raise ValueError('Este turno ya tiene un cierre de caja.')
         if not cash_close.cashier.strip():
             raise ValueError('Indica el responsable del corte.')
         money_fields = (
@@ -26,14 +26,35 @@ class CashCloseRepository:
                       'cash_expenses', 'counted_cash'):
             if getattr(cash_close, field).amount < 0:
                 raise ValueError('Los importes capturados no pueden ser negativos.')
-        self.__session.add(cash_close)
-        self.__session.commit()
+        try:
+            self.__session.add(cash_close)
+            self.__session.commit()
+        except Exception:
+            # SQLAlchemy bloquea toda consulta posterior hasta revertir el flush
+            # fallido. El repositorio debe devolver la sesión en estado utilizable.
+            self.__session.rollback()
+            raise
         return cash_close
 
     def get_by_date(self, close_date):
+        """Conserva compatibilidad y devuelve el cierre más reciente del día."""
         return self.__session.scalar(
             select(CashClose).where(CashClose.date == close_date)
+            .order_by(CashClose.created_at.desc(), CashClose.id.desc()).limit(1)
         )
+
+    def get_for_opening(self, opening_id):
+        if opening_id is None:
+            return None
+        return self.__session.scalar(
+            select(CashClose).where(CashClose.opening_id == opening_id).limit(1)
+        )
+
+    def get_for_date(self, close_date):
+        return self.__session.scalars(
+            select(CashClose).where(CashClose.date == close_date)
+            .order_by(CashClose.created_at.asc(), CashClose.id.asc())
+        ).all()
 
     def get_all(self):
         return self.__session.scalars(
@@ -54,5 +75,12 @@ class CashCloseRepository:
             select(CashClose)
             .where(CashClose.date < close_date)
             .order_by(CashClose.date.desc(), CashClose.id.desc())
+            .limit(1)
+        )
+
+    def get_latest(self):
+        return self.__session.scalar(
+            select(CashClose)
+            .order_by(CashClose.created_at.desc(), CashClose.id.desc())
             .limit(1)
         )

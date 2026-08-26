@@ -1,10 +1,12 @@
 import unittest
+from io import BytesIO
 
+from openpyxl import load_workbook
 from sqlalchemy import create_engine
 from sqlalchemy.orm import Session
 
 from model.entity.models import Base
-from model.report.exports import business_as_dict, generate_pdf_bytes
+from model.report.exports import business_as_dict, generate_excel_bytes, generate_pdf_bytes
 from model.repository.business_profile import BusinessProfileRepository
 
 
@@ -34,6 +36,16 @@ class TestBusinessProfilePersonalization(unittest.TestCase):
         pdf = generate_pdf_bytes(exported, 'Prueba', 'Documento de prueba',
                                  [('Datos', [{'Concepto': 'Total', 'Valor': '100 MXN'}])])
         self.assertTrue(pdf.startswith(b'%PDF'))
+
+        excel = generate_excel_bytes(
+            exported, 'Prueba', 'Documento de prueba',
+            [('Datos', [{'Concepto': 'Total', 'Valor': '100 MXN'}])])
+        workbook = load_workbook(BytesIO(excel), read_only=True)
+        administrative_text = '\n'.join(
+            str(cell.value or '') for row in workbook['Información'].iter_rows()
+            for cell in row)
+        self.assertNotIn('Gracias por elegirnos.', administrative_text)
+        self.assertIn('Cambios dentro de 15 días.', administrative_text)
 
     def test_unknown_profile_field_is_rejected(self):
         with self.assertRaises(ValueError):

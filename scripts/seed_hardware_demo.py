@@ -7,6 +7,7 @@ from sqlalchemy.orm import Session
 from model.entity.models import Base, Expense, Product, Sale
 from model.repository.factory import DB_URL
 from model.util.monetary_types import CUPMoney
+from model.timezone import mexico_today
 
 
 PRODUCTS = (
@@ -39,7 +40,7 @@ def seed_demo_data():
         session.add_all(products)
         session.flush()
 
-        today = date.today()
+        today = mexico_today()
         sales_plan = ((0, 3, 1), (1, 4, 2), (3, 5, 3), (4, 2, 4), (5, 2, 5), (6, 1, 7))
         for product_index, units, days_ago in sales_plan:
             product = products[product_index]

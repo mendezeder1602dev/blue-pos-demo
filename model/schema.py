@@ -4,11 +4,102 @@ from datetime import datetime
 
 from sqlalchemy import create_engine, inspect, text
 
-from model.entity.models import AuthSession, Base, User
+from model.entity.models import (AuthSession, Base, CashClose, CashMovement,
+                                 CashOpening, User)
 from model.repository.factory import DB_URL, RepositoryFactory
+from model.timezone import mexico_now
 
 
-DEMO_CLEANUP_MIGRATION = 'clean_demo_2026_08_24_v1'
+DEMO_CLEANUP_MIGRATION = 'clean_demo_2026_08_25_release_v2'
+
+
+def _allow_multiple_cash_shifts(engine):
+    """Migra el esquema diario anterior a uno que admite varios turnos por fecha.
+
+    SQLite no permite retirar una restricción UNIQUE con ``ALTER TABLE``. En ese
+    motor reconstruimos solamente las tres tablas de caja y preservamos sus filas.
+    En PostgreSQL basta con eliminar las restricciones únicas antiguas por fecha.
+    """
+    inspector = inspect(engine)
+    target_tables = ('cash_openings', 'cash_movements', 'cash_closes')
+    if 'cash_openings' not in inspector.get_table_names():
+        return
+    # Una ejecución interrumpida puede dejar sólo una de las dos tablas con la
+    # restricción diaria. Revisarlas por separado permite reparar ese estado.
+    tables_with_unique_date = []
+    for table_name in ('cash_openings', 'cash_closes'):
+        if table_name not in inspector.get_table_names():
+            continue
+        unique_constraint = any(
+            constraint.get('column_names') == ['date']
+            for constraint in inspector.get_unique_constraints(table_name)
+        )
+        unique_index = any(
+            index.get('column_names') == ['date'] and bool(index.get('unique'))
+            for index in inspector.get_indexes(table_name)
+        )
+        if unique_constraint or unique_index:
+            tables_with_unique_date.append(table_name)
+    if not tables_with_unique_date:
+        return
+
+    if engine.dialect.name == 'postgresql':
+        with engine.begin() as connection:
+            for table_name in ('cash_openings', 'cash_closes'):
+                for constraint in inspect(connection).get_unique_constraints(table_name):
+                    if constraint.get('column_names') == ['date'] and constraint.get('name'):
+                        safe_name = constraint['name'].replace('"', '""')
+                        connection.execute(text(
+                            f'ALTER TABLE {table_name} DROP CONSTRAINT "{safe_name}"'))
+                for index in inspect(connection).get_indexes(table_name):
+                    if (index.get('column_names') == ['date'] and index.get('unique')
+                            and index.get('name')):
+                        safe_name = index['name'].replace('"', '""')
+                        connection.execute(text(f'DROP INDEX IF EXISTS "{safe_name}"'))
+        return
+    if engine.dialect.name != 'sqlite':
+        return
+
+    table_models = (CashOpening.__table__, CashMovement.__table__, CashClose.__table__)
+    connection = engine.connect()
+    try:
+        connection.exec_driver_sql('PRAGMA foreign_keys=OFF')
+        connection.commit()
+        transaction = connection.begin()
+        for table_name in target_tables:
+            for index in inspect(connection).get_indexes(table_name):
+                if index.get('name'):
+                    connection.execute(text(f'DROP INDEX IF EXISTS "{index["name"]}"'))
+        # Renombrar primero libera los nombres para que SQLAlchemy cree el esquema nuevo.
+        for table_name in ('cash_movements', 'cash_closes', 'cash_openings'):
+            connection.execute(text(
+                f'ALTER TABLE {table_name} RENAME TO {table_name}_legacy_shift'))
+        for table in table_models:
+            table.create(connection)
+        for table in table_models:
+            legacy = f'{table.name}_legacy_shift'
+            old_columns = {column['name'] for column in inspect(connection).get_columns(legacy)}
+            common = [column.name for column in table.columns if column.name in old_columns]
+            columns_sql = ', '.join(f'"{column}"' for column in common)
+            connection.execute(text(
+                f'INSERT INTO {table.name} ({columns_sql}) '
+                f'SELECT {columns_sql} FROM {legacy}'))
+        # Los datos históricos eran un turno por día; se vinculan de forma inequívoca.
+        connection.execute(text(
+            'UPDATE cash_closes SET opening_id = ('
+            'SELECT id FROM cash_openings WHERE cash_openings.date = cash_closes.date '
+            'ORDER BY id DESC LIMIT 1) WHERE opening_id IS NULL'))
+        connection.execute(text(
+            'UPDATE cash_movements SET opening_id = ('
+            'SELECT id FROM cash_openings WHERE cash_openings.date = cash_movements.date '
+            'ORDER BY id DESC LIMIT 1) WHERE opening_id IS NULL'))
+        for table_name in ('cash_movements', 'cash_closes', 'cash_openings'):
+            connection.execute(text(f'DROP TABLE {table_name}_legacy_shift'))
+        transaction.commit()
+    finally:
+        connection.exec_driver_sql('PRAGMA foreign_keys=ON')
+        connection.commit()
+        connection.close()
 
 
 def _clean_demo_operational_data_once(engine):
@@ -42,12 +133,13 @@ def _clean_demo_operational_data_once(engine):
         connection.execute(
             text('INSERT INTO deployment_migrations (migration_key, applied_at) '
                  'VALUES (:key, :applied_at)'),
-            {'key': DEMO_CLEANUP_MIGRATION, 'applied_at': datetime.utcnow().isoformat()})
+            {'key': DEMO_CLEANUP_MIGRATION, 'applied_at': mexico_now().isoformat()})
     return True
 
 
 def create_database(database_url=DB_URL):
     engine = create_engine(database_url, future=True)
+    _allow_multiple_cash_shifts(engine)
     Base.metadata.create_all(engine)
     inspector = inspect(engine)
 
@@ -102,6 +194,7 @@ def create_database(database_url=DB_URL):
             'reversal_reason': "VARCHAR(300) DEFAULT ''", 'reversed_at': 'DATETIME',
             'returned_at': 'DATETIME', 'return_reason': "VARCHAR(300) DEFAULT ''",
             'refund_method': "VARCHAR(50) DEFAULT ''",
+            'return_disposition': "VARCHAR(30) DEFAULT ''",
             'customer': "VARCHAR(120) DEFAULT 'Público general'",
         })
         connection.execute(text(
@@ -124,12 +217,21 @@ def create_database(database_url=DB_URL):
             'source_close_id': 'INTEGER',
             'shift_responsible': "VARCHAR(120) DEFAULT 'Vendedor'",
         })
+        add_columns(connection, 'cash_movements', {'opening_id': 'INTEGER'})
         add_columns(connection, 'cash_closes', {
             'denomination_details': "TEXT DEFAULT '{}'",
+            'opening_id': 'INTEGER',
         })
-    # Una limpieza nunca debe formar parte del arranque normal. Se conserva
-    # exclusivamente para entornos demo creados de forma deliberada.
-    if os.getenv('BLUE_POS_DEMO_RESET', '').strip().lower() in ('1', 'true', 'yes'):
+    # Esta versión pública es una demo de Streamlit Community Cloud. La clave de
+    # migración garantiza que la limpieza se ejecute una sola vez por despliegue,
+    # sin tocar credenciales ni el perfil comercial y sin repetirse en cada rerun.
+    demo_reset_requested = (
+        os.getenv('BLUE_POS_DEMO_RESET', '').strip().lower() in ('1', 'true', 'yes')
+    )
+    community_cloud = (
+        os.getenv('STREAMLIT_SHARING_MODE', '').strip().lower() in ('1', 'true', 'yes')
+    )
+    if demo_reset_requested or community_cloud:
         _clean_demo_operational_data_once(engine)
 
 

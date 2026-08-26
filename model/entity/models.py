@@ -12,6 +12,7 @@ from sqlalchemy import Date, DateTime
 from model.util.money_colum import MoneyColumn
 from model.util.monetary_types import CUPMoney
 from datetime import date, datetime
+from model.timezone import mexico_now, mexico_today
 
 Base = declarative_base()
 
@@ -81,13 +82,13 @@ class Sale(Base):
     __tablename__ = 'sales'
     id = Column(Integer, primary_key=True)
     product_id = Column(Integer, ForeignKey('products.id', ondelete='CASCADE'), nullable=False)
-    date = Column(Date, nullable=False, default=date.today, index=True)
+    date = Column(Date, nullable=False, default=mexico_today, index=True)
     price = Column(MoneyColumn(), nullable=False, default=CUPMoney('1.00'))
     cost = Column(MoneyColumn(), nullable=False, default=CUPMoney('1.00'))
     payment_method = Column(String(length=50), nullable=False, default='cash')
     payment_details = Column(String(length=250), nullable=True, default='')
     transaction_id = Column(String(length=36), nullable=True, index=True)
-    created_at = Column(DateTime, nullable=False, default=datetime.now, index=True)
+    created_at = Column(DateTime, nullable=False, default=mexico_now, index=True)
     product_name = Column(String(length=80), nullable=True, default='')
     cashier = Column(String(length=120), nullable=False, default='Vendedor')
     status = Column(String(length=30), nullable=False, default='Completada', index=True)
@@ -96,6 +97,8 @@ class Sale(Base):
     returned_at = Column(DateTime, nullable=True)
     return_reason = Column(String(length=300), nullable=True, default='')
     refund_method = Column(String(length=50), nullable=True, default='')
+    # Destino físico de la unidad devuelta: vuelve a venta o queda dada de baja.
+    return_disposition = Column(String(length=30), nullable=True, default='')
     customer = Column(String(length=120), nullable=True, default='Público general')
     # Las eliminaciones físicas sólo se reservan para mantenimiento/pruebas. La
     # aplicación usa archivado lógico y nunca invoca este borrado sobre ventas reales.
@@ -112,7 +115,7 @@ class Quote(Base):
     """Cotización editable que agrupa uno o más conceptos antes de vender."""
     __tablename__ = 'quotes'
     id = Column(Integer, primary_key=True)
-    date = Column(Date, nullable=False, default=date.today, index=True)
+    date = Column(Date, nullable=False, default=mexico_today, index=True)
     customer = Column(String(length=120), nullable=False, default='Público general')
     notes = Column(String(length=500), nullable=True, default='')
     status = Column(String(length=30), nullable=False, default='Pendiente')
@@ -155,8 +158,8 @@ class Expense(Base):
     name = Column(String(length=EXPENSE_NAME_MAX_LENGTH), nullable=False)
     description = Column(String(length=EXPENSE_DESCRIPTION_MAX_LENGTH), nullable=True, default='')
     spent_money = Column(MoneyColumn(), nullable=False, default=CUPMoney('-1.00'))
-    date = Column(Date, nullable=False, default=date.today)
-    created_at = Column(DateTime, nullable=False, default=datetime.now)
+    date = Column(Date, nullable=False, default=mexico_today)
+    created_at = Column(DateTime, nullable=False, default=mexico_now)
     is_active = Column(Boolean, nullable=False, default=True, index=True)
     payment_method = Column(String(length=30), nullable=False, default='Efectivo')
     category = Column(String(length=80), nullable=False, default='Operación')
@@ -172,7 +175,7 @@ class HeldSale(Base):
     label = Column(String(length=120), nullable=False)
     notes = Column(String(length=300), nullable=True, default='')
     created_by = Column(String(length=120), nullable=False, default='Vendedor')
-    created_at = Column(DateTime, nullable=False, default=datetime.now)
+    created_at = Column(DateTime, nullable=False, default=mexico_now)
     items = relationship('HeldSaleItem', backref='held_sale', cascade='all,delete-orphan')
 
 
@@ -197,7 +200,7 @@ class StockMovement(Base):
     reason = Column(String(length=300), nullable=False)
     reference = Column(String(length=80), nullable=True, default='')
     performed_by = Column(String(length=120), nullable=False, default='Administrador')
-    created_at = Column(DateTime, nullable=False, default=datetime.now, index=True)
+    created_at = Column(DateTime, nullable=False, default=mexico_now, index=True)
 
 
 class AuditLog(Base):
@@ -209,7 +212,7 @@ class AuditLog(Base):
     entity_type = Column(String(length=50), nullable=False)
     entity_id = Column(String(length=80), nullable=True, default='')
     detail = Column(String(length=600), nullable=False)
-    created_at = Column(DateTime, nullable=False, default=datetime.now, index=True)
+    created_at = Column(DateTime, nullable=False, default=mexico_now, index=True)
 
 
 class Customer(Base):
@@ -222,14 +225,14 @@ class Customer(Base):
     tax_id = Column(String(length=40), nullable=True, default='')
     notes = Column(String(length=400), nullable=True, default='')
     is_active = Column(Boolean, nullable=False, default=True)
-    created_at = Column(DateTime, nullable=False, default=datetime.now)
+    created_at = Column(DateTime, nullable=False, default=mexico_now)
 
 
 class CashOpening(Base):
-    """Apertura diaria definida exclusivamente por administración."""
+    """Apertura de un turno de caja definida exclusivamente por administración."""
     __tablename__ = 'cash_openings'
     id = Column(Integer, primary_key=True)
-    date = Column(Date, nullable=False, unique=True, index=True)
+    date = Column(Date, nullable=False, index=True)
     opening_amount = Column(MoneyColumn(), nullable=False, default=CUPMoney('0.00'))
     cash_limit = Column(MoneyColumn(), nullable=False, default=CUPMoney('3000.00'))
     opened_by = Column(String(length=120), nullable=False)
@@ -237,26 +240,29 @@ class CashOpening(Base):
     notes = Column(String(length=400), nullable=True, default='')
     denomination_details = Column(Text, nullable=True, default='{}')
     source_close_id = Column(Integer, nullable=True)
-    created_at = Column(DateTime, nullable=False, default=datetime.now)
+    created_at = Column(DateTime, nullable=False, default=mexico_now)
 
 
 class CashMovement(Base):
     """Entrada o retiro autorizado que modifica el efectivo físico de caja."""
     __tablename__ = 'cash_movements'
     id = Column(Integer, primary_key=True)
+    opening_id = Column(Integer, ForeignKey('cash_openings.id'), nullable=True, index=True)
     date = Column(Date, nullable=False, index=True)
     movement_type = Column(String(length=20), nullable=False)
     amount = Column(MoneyColumn(), nullable=False)
     reason = Column(String(length=300), nullable=False)
     authorized_by = Column(String(length=120), nullable=False)
-    created_at = Column(DateTime, nullable=False, default=datetime.now)
+    created_at = Column(DateTime, nullable=False, default=mexico_now)
 
 
 class CashClose(Base):
-    """Fotografía inmutable de la conciliación diaria de caja."""
+    """Fotografía inmutable de la conciliación de un turno de caja."""
     __tablename__ = 'cash_closes'
     id = Column(Integer, primary_key=True)
-    date = Column(Date, nullable=False, unique=True, index=True)
+    date = Column(Date, nullable=False, index=True)
+    opening_id = Column(Integer, ForeignKey('cash_openings.id'), nullable=True,
+                        unique=True, index=True)
     cashier = Column(String(length=120), nullable=False)
     operation_count = Column(Integer, nullable=False, default=0)
     total_sales = Column(MoneyColumn(), nullable=False, default=CUPMoney('0.00'))
@@ -274,7 +280,7 @@ class CashClose(Base):
     difference = Column(MoneyColumn(), nullable=False, default=CUPMoney('0.00'))
     notes = Column(String(length=600), nullable=True, default='')
     denomination_details = Column(Text, nullable=True, default='{}')
-    created_at = Column(DateTime, nullable=False, default=datetime.now)
+    created_at = Column(DateTime, nullable=False, default=mexico_now)
 
 
 class BusinessProfile(Base):

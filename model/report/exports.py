@@ -103,8 +103,8 @@ def generate_pdf_bytes(business: dict, title: str, subtitle: str,
             ('RIGHTPADDING', (0, 0), (-1, -1), 5),
         ]))
         story.extend((table, Spacer(1, 10)))
-    if business.get('receipt_footer'):
-        story.append(Paragraph(escape(business['receipt_footer']), centered))
+    # El agradecimiento pertenece al comprobante entregado al cliente. Los PDF
+    # administrativos conservan identidad y políticas, pero no texto comercial.
     if business.get('return_policy'):
         story.append(Paragraph(f"Política: {escape(business['return_policy'])}", centered))
     document.build(story)
@@ -121,8 +121,7 @@ def generate_excel_bytes(business: dict, title: str, subtitle: str,
     information.append([title])
     information.append([subtitle])
     information.append(['Moneda: peso mexicano (MXN)'])
-    if business.get('receipt_footer'):
-        information.append([business['receipt_footer']])
+    # El agradecimiento se reserva para tickets de venta y venta express.
     if business.get('return_policy'):
         information.append([f"Política: {business['return_policy']}"])
     for line in _business_lines(business)[1:]:

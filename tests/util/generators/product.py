@@ -1,5 +1,6 @@
 from model.entity.models import Product
 from faker import Faker
+from uuid import uuid4
 
 from model.util.monetary_types import CUPMoney
 
@@ -23,7 +24,9 @@ class ProductGenerator:
     @staticmethod
     def generate_one_product() -> Product:
         a_product = Product()
-        a_product.name = fake.company()
+        # Faker puede repetir empresas durante una suite larga; el sufijo mantiene
+        # la prueba determinista frente al índice único de nombres del inventario.
+        a_product.name = f'{fake.company()} {uuid4().hex[:8]}'[:80]
         a_product.description = fake.text()
         a_product.quantity = 5
         a_product.price = ProductGenerator.DEFAULT_MONEY

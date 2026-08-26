@@ -53,6 +53,45 @@ class TestSaleRepository(unittest.TestCase):
         product = get_one_product_from_database()
         self.assertEqual(product.quantity, 2)
 
+    def test_partial_return_only_restocks_selected_units(self):
+        product = ProductGenerator.generate_one_product()
+        product.quantity = 5
+        product = insert_product_and_return_it(product)
+        sale = SaleGenerator.generate_one_sale_from_product(product)
+        sale.transaction_id = 'ticket-partial-restock'
+        self.sale_repository.insert_sales(sale, 3)
+        sold_units = get_all_sales_from_database()
+
+        returned = self.sale_repository.return_items(
+            sale.transaction_id,
+            [{'sale_ids': [sold_units[0].id, sold_units[1].id],
+              'disposition': 'Reintegrar a inventario'}],
+            'Cliente devolvió dos unidades', 'Efectivo')
+
+        self.assertEqual(len(returned), 2)
+        self.assertEqual(get_one_product_from_database().quantity, 4)
+        statuses = [unit.status for unit in get_all_sales_from_database()]
+        self.assertEqual(statuses.count('Devuelta'), 2)
+        self.assertEqual(statuses.count('Completada'), 1)
+
+    def test_writeoff_return_does_not_increase_sellable_stock(self):
+        product = ProductGenerator.generate_one_product()
+        product.quantity = 3
+        product = insert_product_and_return_it(product)
+        sale = SaleGenerator.generate_one_sale_from_product(product)
+        sale.transaction_id = 'ticket-writeoff'
+        self.sale_repository.insert_sales(sale, 1)
+        sold_unit = get_all_sales_from_database()[0]
+
+        returned = self.sale_repository.return_items(
+            sale.transaction_id,
+            [{'sale_ids': [sold_unit.id], 'disposition': 'Dar de baja'}],
+            'Producto dañado confirmado', 'Vale')
+
+        self.assertEqual(len(returned), 1)
+        self.assertEqual(get_one_product_from_database().quantity, 2)
+        self.assertEqual(returned[0].return_disposition, 'Dar de baja')
+
     def test_sale_insertion_with_no_enough_products_raises_exception(self):
         product = ProductGenerator.generate_one_product()
         product.quantity = 2

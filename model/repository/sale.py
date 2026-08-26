@@ -5,7 +5,7 @@ from uuid import uuid4
 
 from sqlalchemy import update, select, delete, cast, Numeric, asc, desc, Float, func
 
-from model.entity.models import Product, Sale
+from model.entity.models import Product, Sale, StockMovement
 from sqlalchemy.orm import Session, aliased
 
 from model.repository.exc.product import NonExistentProductException, NoPositivePriceException, NegativeCostException
@@ -14,6 +14,7 @@ from model.repository.exc.sale import NoEnoughProductQuantityException, NonExist
 from model.repository.observer import RepositoryObserver
 from model.util.monetary_types import CUPMoney
 from model.authorization import require_role
+from model.timezone import mexico_now
 
 
 class SaleFilter:
@@ -233,7 +234,7 @@ class SaleRepository(RepositoryObserver):
             restored[sale.product_id] = restored.get(sale.product_id, 0) + 1
             sale.status = 'Anulada'
             sale.reversal_reason = reason
-            sale.reversed_at = datetime.now()
+            sale.reversed_at = mexico_now()
         for product_id, quantity in restored.items():
             self.__session.execute(update(Product).where(Product.id == product_id).values(
                 quantity=Product.quantity + quantity
@@ -242,32 +243,88 @@ class SaleRepository(RepositoryObserver):
         self._notify_on_data_changed_listeners()
         return sales
 
-    def return_transaction(self, transaction_id: str, reason: str, refund_method: str):
+    def return_items(self, transaction_id: str, return_plan: list, reason: str,
+                     refund_method: str, actor: str = 'Administrador'):
         require_role('superuser')
-        """Devuelve un ticket completo, repone existencias y conserva la evidencia."""
+        """Devuelve unidades elegidas y concilia su destino físico de forma atómica."""
         reason = (reason or '').strip()
         if len(reason) < 5:
             raise ValueError('Escribe un motivo de devolución de al menos 5 caracteres.')
         if refund_method not in ('Efectivo', 'Tarjeta', 'Transferencia', 'Vale'):
             raise ValueError('Selecciona un método de reembolso válido.')
-        sales = list(self.__session.scalars(
-            select(Sale).where(Sale.transaction_id == transaction_id)
-        ).all())
-        if not sales or any(sale.status != 'Completada' for sale in sales):
-            raise ValueError('La operación no existe o ya fue anulada o devuelta.')
+
+        allowed_dispositions = ('Reintegrar a inventario', 'Dar de baja')
+        selected = []
+        seen_ids = set()
+        for group in return_plan or []:
+            disposition = group.get('disposition')
+            if disposition not in allowed_dispositions:
+                raise ValueError('Selecciona un destino válido para cada producto.')
+            for raw_sale_id in group.get('sale_ids', []):
+                sale_id = int(raw_sale_id)
+                if sale_id in seen_ids:
+                    raise ValueError('La selección contiene unidades duplicadas.')
+                seen_ids.add(sale_id)
+                selected.append((sale_id, disposition))
+        if not selected:
+            raise ValueError('Selecciona al menos una unidad para devolver.')
+
+        sales_by_id = {
+            sale.id: sale for sale in self.__session.scalars(
+                select(Sale).where(Sale.id.in_(seen_ids))
+            ).all()
+        }
+        if len(sales_by_id) != len(seen_ids):
+            raise ValueError('Una de las unidades seleccionadas ya no existe.')
+        if any(sales_by_id[sale_id].transaction_id != transaction_id
+               or sales_by_id[sale_id].status != 'Completada'
+               for sale_id, _ in selected):
+            raise ValueError('El ticket cambió o alguna unidad ya fue devuelta o anulada.')
+
+        now = mexico_now()
         restored = {}
-        for sale in sales:
-            restored[sale.product_id] = restored.get(sale.product_id, 0) + 1
-            sale.status = 'Devuelta'
-            sale.returned_at = datetime.now()
-            sale.return_reason = reason
-            sale.refund_method = refund_method
-        for product_id, quantity in restored.items():
-            self.__session.execute(update(Product).where(Product.id == product_id).values(
-                quantity=Product.quantity + quantity))
-        self.__session.commit()
+        try:
+            for sale_id, disposition in selected:
+                sale = sales_by_id[sale_id]
+                sale.status = 'Devuelta'
+                sale.returned_at = now
+                sale.return_reason = reason
+                sale.refund_method = refund_method
+                sale.return_disposition = disposition
+                if disposition == 'Reintegrar a inventario':
+                    restored[sale.product_id] = restored.get(sale.product_id, 0) + 1
+
+            for product_id, quantity in restored.items():
+                product = self.__session.scalar(select(Product).where(Product.id == product_id))
+                if product is None:
+                    raise ValueError('Uno de los productos ya no existe en el inventario.')
+                previous_stock = product.quantity
+                product.quantity += quantity
+                self.__session.add(StockMovement(
+                    product_id=product_id, movement_type='Devolución', quantity=quantity,
+                    previous_stock=previous_stock, resulting_stock=product.quantity,
+                    reason=f'Reintegración por devolución: {reason}',
+                    reference=transaction_id, performed_by=actor,
+                ))
+            self.__session.commit()
+        except Exception:
+            self.__session.rollback()
+            raise
         self._notify_on_data_changed_listeners()
-        return sales
+        return [sales_by_id[sale_id] for sale_id, _ in selected]
+
+    def return_transaction(self, transaction_id: str, reason: str, refund_method: str):
+        """Compatibilidad: devuelve todo el ticket y reintegra sus existencias."""
+        sales = list(self.__session.scalars(
+            select(Sale).where(
+                Sale.transaction_id == transaction_id,
+                Sale.status == 'Completada',
+            )
+        ).all())
+        return self.return_items(transaction_id, [{
+            'sale_ids': [sale.id for sale in sales],
+            'disposition': 'Reintegrar a inventario',
+        }], reason, refund_method)
 
     def __check_sales_exists(self, sale_id_list: list):
         found_ids = set(self.__session.scalars(
