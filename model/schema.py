@@ -105,7 +105,8 @@ def _allow_multiple_cash_shifts(engine):
 def _clean_demo_operational_data_once(engine):
     """Limpia datos de prueba una sola vez sin eliminar accesos ni perfil comercial."""
     operational_tables = (
-        'held_sale_items', 'held_sales', 'quote_items', 'quotes', 'stock_movements',
+        'held_sale_items', 'held_sales', 'quote_items', 'quotes',
+        'return_loss_requests', 'stock_movements',
         'audit_logs', 'cash_movements', 'cash_closes', 'cash_openings', 'expenses',
         'sales', 'products', 'customers', 'catalog_settings',
     )

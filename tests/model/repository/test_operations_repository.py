@@ -3,7 +3,8 @@ import unittest
 from sqlalchemy import create_engine, delete
 from sqlalchemy.orm import Session
 
-from model.entity.models import AuditLog, Base, HeldSale, Product, StockMovement
+from model.entity.models import (AuditLog, Base, HeldSale, Product,
+                                 ReturnLossRequest, StockMovement)
 from model.repository.operations import OperationsRepository
 from model.util.monetary_types import CUPMoney
 
@@ -23,6 +24,7 @@ class TestOperationsRepository(unittest.TestCase):
 
     def tearDown(self):
         self.session.execute(delete(HeldSale))
+        self.session.execute(delete(ReturnLossRequest))
         self.session.execute(delete(StockMovement))
         self.session.execute(delete(AuditLog))
         self.session.execute(delete(Product).where(Product.id == self.product.id))
@@ -71,6 +73,40 @@ class TestOperationsRepository(unittest.TestCase):
             self.repository.adjust_stock(
                 self.product.id, -1, 'Merma', 'Producto dañado', 'Administrador',
                 unit_cost=10)
+
+    def test_return_review_can_authorize_writeoff_without_reducing_sellable_stock(self):
+        request = ReturnLossRequest(
+            transaction_id='ticket-damaged', product_id=self.product.id,
+            product_name=self.product.name, quantity=2, sale_ids='[]',
+            concept='Producto dañado o no funciona', reason='No enciende',
+            requested_by='Administrador')
+        self.session.add(request)
+        self.session.commit()
+
+        resolved = self.repository.resolve_return_loss_request(
+            request.id, 'Autorizar baja', 'Administrador', 'Daño confirmado')
+
+        self.assertEqual(resolved.status, 'Baja autorizada')
+        self.assertEqual(self.product.quantity, 10)
+        movement = self.repository.get_stock_movements()[0]
+        self.assertEqual(movement.quantity, 0)
+        self.assertEqual(movement.movement_type, 'Baja por devolución')
+
+    def test_return_review_can_reintegrate_verified_product(self):
+        request = ReturnLossRequest(
+            transaction_id='ticket-review', product_id=self.product.id,
+            product_name=self.product.name, quantity=2, sale_ids='[]',
+            concept='Otro · requiere revisión', reason='Revisión solicitada',
+            requested_by='Administrador')
+        self.session.add(request)
+        self.session.commit()
+
+        resolved = self.repository.resolve_return_loss_request(
+            request.id, 'Reintegrar a inventario', 'Administrador',
+            'Producto funcional y completo')
+
+        self.assertEqual(resolved.status, 'Reintegrado')
+        self.assertEqual(self.product.quantity, 12)
 
 
 if __name__ == '__main__':

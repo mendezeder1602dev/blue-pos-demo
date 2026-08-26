@@ -203,6 +203,25 @@ class StockMovement(Base):
     created_at = Column(DateTime, nullable=False, default=mexico_now, index=True)
 
 
+class ReturnLossRequest(Base):
+    """Producto devuelto no vendible, retenido hasta que administración lo dictamine."""
+    __tablename__ = 'return_loss_requests'
+    id = Column(Integer, primary_key=True)
+    transaction_id = Column(String(length=36), nullable=False, index=True)
+    product_id = Column(Integer, ForeignKey('products.id', ondelete='RESTRICT'), nullable=False)
+    product_name = Column(String(length=80), nullable=False)
+    quantity = Column(Integer, nullable=False)
+    sale_ids = Column(Text, nullable=False, default='[]')
+    concept = Column(String(length=160), nullable=False)
+    reason = Column(String(length=300), nullable=False)
+    status = Column(String(length=30), nullable=False, default='Pendiente', index=True)
+    requested_by = Column(String(length=120), nullable=False, default='Administrador')
+    requested_at = Column(DateTime, nullable=False, default=mexico_now, index=True)
+    resolved_by = Column(String(length=120), nullable=True, default='')
+    resolved_at = Column(DateTime, nullable=True)
+    resolution_notes = Column(String(length=300), nullable=True, default='')
+
+
 class AuditLog(Base):
     """Bitácora operativa inmutable para acciones sensibles."""
     __tablename__ = 'audit_logs'

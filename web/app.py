@@ -1631,6 +1631,7 @@ def _render_inventory_movements():
     entry_version = _form_version('inventory_entry')
     loss_version = _form_version('inventory_loss')
     count_version = _form_version('inventory_count')
+    review_version = _form_version('return_loss_review')
 
     with entry_tab:
         st.markdown('### :material/add_box: Registrar entrada')
@@ -1717,6 +1718,84 @@ def _render_inventory_movements():
         st.caption(
             'Documenta productos dañados, caducados, perdidos o utilizados internamente. '
             'Nunca se permiten existencias negativas.')
+        operations_repository = RepositoryFactory.get_operations_repository()
+        pending_returns = operations_repository.get_return_loss_requests('Pendiente')
+        if pending_returns:
+            st.warning(
+                f'Hay **{len(pending_returns)} solicitud(es)** de productos devueltos '
+                'pendientes de dictamen. Estas unidades están fuera del stock vendible.',
+                icon=':material/pending_actions:')
+            with st.container(border=True):
+                st.markdown('#### :material/fact_check: Revisar devolución no vendible')
+                request_labels = {
+                    (f'Solicitud #{request.id} · {request.product_name} · '
+                     f'{request.quantity} unidad(es) · '
+                     f'Ticket {str(request.transaction_id)[:8].upper()}'):
+                    request for request in pending_returns
+                }
+                selected_request_label = st.selectbox(
+                    'Solicitud pendiente', list(request_labels),
+                    key=f'return_loss_request_{review_version}')
+                selected_request = request_labels[selected_request_label]
+                request_metrics = st.columns(3)
+                request_metrics[0].metric('Unidades retenidas', selected_request.quantity)
+                request_metrics[1].metric('Producto', selected_request.product_name)
+                request_metrics[2].metric(
+                    'Solicitó', selected_request.requested_by or 'Administrador')
+                st.info(
+                    f'**Concepto:** {selected_request.concept}\n\n'
+                    f'**Detalle:** {selected_request.reason}',
+                    icon=':material/assignment_return:')
+                with st.form(
+                        f'resolve_return_loss_{review_version}', enter_to_submit=False):
+                    resolution = st.segmented_control(
+                        'Dictamen de inventario',
+                        ('Autorizar baja', 'Reintegrar a inventario'),
+                        default='Autorizar baja',
+                        help=('Autorizar baja documenta la disposición sin reducir el stock, '
+                              'porque la devolución nunca ingresó como mercancía vendible.'))
+                    resolution_notes = st.text_area(
+                        'Resultado de la revisión *',
+                        placeholder=('Ejemplo: equipo probado, no enciende y se envía '
+                                     'a disposición final'))
+                    confirm_resolution = st.checkbox(
+                        'Confirmo que revisé físicamente el producto y el dictamen es correcto.')
+                    resolve_submitted = st.form_submit_button(
+                        'Guardar dictamen', type='primary',
+                        icon=':material/fact_check:', width='stretch')
+                if resolve_submitted:
+                    if not confirm_resolution:
+                        st.error('Confirma la revisión física antes de guardar el dictamen.',
+                                 icon=':material/check_box:')
+                    elif len(resolution_notes.strip()) < 5:
+                        st.error('Describe el resultado con al menos 5 caracteres.',
+                                 icon=':material/edit_note:')
+                    else:
+                        try:
+                            resolved = operations_repository.resolve_return_loss_request(
+                                selected_request.id, resolution, _actor_name(),
+                                resolution_notes.strip())
+                            action_text = (
+                                'quedaron dadas de baja' if resolved.status == 'Baja autorizada'
+                                else 'regresaron al inventario vendible')
+                            _queue_activity_notice(
+                                'Dictamen de devolución guardado',
+                                f'{resolved.quantity} unidad(es) de “{resolved.product_name}” '
+                                f'{action_text}.',
+                                tone=('warning' if resolved.status == 'Baja autorizada'
+                                      else 'success'),
+                                icon=':material/fact_check:')
+                            _reset_form('return_loss_review')
+                            st.rerun()
+                        except Exception as error:
+                            st.error(f'No se guardó el dictamen: {error}',
+                                     icon=':material/error:')
+        else:
+            st.info(
+                'No hay devoluciones dañadas pendientes de revisión.',
+                icon=':material/task_alt:')
+        st.divider()
+        st.markdown('#### Registrar merma directa')
         available = [product for product in products if product.quantity > 0]
         selected = _movement_product_selector(
             available, f'loss_{loss_version}') if available else None
@@ -4208,102 +4287,85 @@ def _render_returns():
     for sale in sorted(selected_sales, key=lambda item: item.id):
         group_key = (sale.product_id, sale.product_name, float(sale.price.amount))
         grouped.setdefault(group_key, []).append(sale)
-    rows = []
-    group_sale_ids = {}
-    for row_number, ((product_id, product_name, unit_price), lines) in enumerate(grouped.items()):
-        group_sale_ids[row_number] = [line.id for line in lines]
-        rows.append({
-            'Devolver': True,
-            'Producto': product_name or f'Producto #{product_id}',
-            'Disponibles': len(lines),
-            'Cantidad': len(lines),
-            'Destino': 'Reintegrar a inventario',
-            'Precio unitario': unit_price,
-        })
-    st.caption('Desmarca **Devolver** para quitar un producto o cambia la cantidad.')
-    edited = st.data_editor(
-        pd.DataFrame(rows), hide_index=True, width='stretch', num_rows='fixed',
-        key=f'return_items_editor_{selected_id}_{return_version}',
-        disabled=('Producto', 'Disponibles', 'Precio unitario'),
-        column_config={
-            'Devolver': st.column_config.CheckboxColumn('Devolver', width='small'),
-            'Producto': st.column_config.TextColumn('Producto', width='large'),
-            'Disponibles': st.column_config.NumberColumn('Máximo', width='small'),
-            'Cantidad': st.column_config.NumberColumn(
-                'Cantidad', min_value=0, step=1, width='small', required=True),
-            'Destino': st.column_config.SelectboxColumn(
-                'Destino del producto',
-                options=('Reintegrar a inventario', 'Dar de baja'), required=True,
-                help='Reintegra sólo artículos aptos para volver a venderse.'),
-            'Precio unitario': st.column_config.NumberColumn(
-                'Precio unitario', format='$ %.2f MXN'),
-        })
-    st.warning(
-        '**Antes de guardar:** reintegra únicamente mercancía completa y vendible. '
-        'Usa **Dar de baja** para productos dañados, incompletos o no aptos; éstos no '
-        'aumentarán la existencia disponible.', icon=':material/inventory:')
-
-    editor_signature = tuple(
-        (bool(row['Devolver']), str(row['Cantidad']), str(row['Destino']))
-        for _, row in edited.iterrows()
-    )
-
-    if st.button('Guardar selección de devolución', type='primary',
-                 icon=':material/save:', width='stretch',
-                 key=f'save_return_selection_{return_version}'):
-        plan = []
-        errors = []
-        for row_number, row in edited.iterrows():
-            if not bool(row['Devolver']):
-                continue
-            raw_quantity = row['Cantidad']
-            quantity = int(raw_quantity) if pd.notna(raw_quantity) else 0
-            maximum = int(row['Disponibles'])
-            if quantity != raw_quantity or quantity < 1 or quantity > maximum:
-                errors.append(
-                    f"{row['Producto']}: la cantidad debe ser un número entero entre 1 y {maximum}.")
-                continue
-            plan.append({
-                'sale_ids': group_sale_ids[row_number][:quantity],
-                'disposition': row['Destino'],
-                'product_name': row['Producto'],
-                'unit_price': float(row['Precio unitario']),
-            })
-        if errors:
-            for error in errors:
-                st.error(error, icon=':material/error:')
-        elif not plan:
-            st.error('Selecciona al menos un artículo para devolver.', icon=':material/checklist:')
-        else:
-            st.session_state['return_draft'] = {
-                'transaction_id': selected_id, 'plan': plan,
-                'editor_signature': editor_signature,
-            }
-            st.success(
-                'Selección guardada. Revisa el resumen y autoriza la devolución.',
-                icon=':material/task_alt:')
-
+    return_concepts = {
+        'Cliente cambió de opinión · producto en buen estado': 'Reintegrar a inventario',
+        'No era el producto esperado · en buen estado': 'Reintegrar a inventario',
+        'Producto dañado o no funciona': 'Enviar a revisión de merma',
+        'Producto incompleto o empaque comprometido': 'Enviar a revisión de merma',
+        'Otro · requiere revisión': 'Enviar a revisión de merma',
+    }
     draft = st.session_state.get('return_draft')
-    if (not draft or draft.get('transaction_id') != selected_id
-            or draft.get('editor_signature') != editor_signature):
-        if draft and draft.get('transaction_id') == selected_id:
+    if not draft or draft.get('transaction_id') != selected_id:
+        st.caption('Selecciona cantidades y condición. Los cambios se aplican al guardar.')
+        selection_inputs = []
+        with st.form(
+                f'return_items_form_{selected_id}_{return_version}',
+                enter_to_submit=False):
+            for row_number, ((product_id, product_name, unit_price), lines) in enumerate(
+                    grouped.items()):
+                stable_key = f'{selected_id}_{product_id}_{row_number}_{return_version}'
+                display_name = product_name or f'Producto #{product_id}'
+                with st.container(border=True):
+                    include = st.checkbox(
+                        f'Devolver {display_name}', value=True,
+                        key=f'return_include_{stable_key}')
+                    st.caption(
+                        f'Disponibles para devolución: {len(lines)} · '
+                        f'Precio unitario: {_mxn(unit_price)}')
+                    quantity = st.number_input(
+                        f'Cantidad de {display_name}', min_value=1,
+                        max_value=len(lines), value=len(lines), step=1,
+                        key=f'return_quantity_{stable_key}')
+                    concept = st.selectbox(
+                        f'Concepto y condición de {display_name}', tuple(return_concepts),
+                        key=f'return_concept_{stable_key}',
+                        help=('Los productos en buen estado regresan al stock; los dañados '
+                              'se envían a revisión de merma.'))
+                    selection_inputs.append({
+                        'include': include, 'quantity': int(quantity),
+                        'concept': concept, 'sale_ids': [line.id for line in lines],
+                        'product_name': display_name, 'unit_price': unit_price,
+                    })
             st.warning(
-                'Hay cambios pendientes. Vuelve a guardar la selección para actualizar '
-                'la autorización final.', icon=':material/edit:')
-        st.caption('Guarda la selección para habilitar la autorización final.')
+                '**Regla de inventario:** los productos en buen estado regresan al stock. '
+                'Los dañados, incompletos o no funcionales quedan retenidos y generan una '
+                'solicitud en **Entradas y mermas**.', icon=':material/inventory:')
+            selection_submitted = st.form_submit_button(
+                'Guardar selección de devolución', type='primary',
+                icon=':material/save:', width='stretch')
+        if selection_submitted:
+            plan = [{
+                'sale_ids': item['sale_ids'][:item['quantity']],
+                'disposition': return_concepts[item['concept']],
+                'concept': item['concept'],
+                'product_name': item['product_name'],
+                'unit_price': float(item['unit_price']),
+            } for item in selection_inputs if item['include']]
+            if not plan:
+                st.error('Selecciona al menos un producto para devolver.',
+                         icon=':material/checklist:')
+            else:
+                st.session_state['return_draft'] = {
+                    'transaction_id': selected_id, 'plan': plan,
+                }
+                st.rerun()
         return
     return_plan = draft['plan']
+    if st.button('Editar selección', icon=':material/edit:',
+                 key=f'edit_return_selection_{return_version}'):
+        st.session_state.pop('return_draft', None)
+        st.rerun()
     selected_ids = {sale_id for group in return_plan for sale_id in group['sale_ids']}
     sales_by_id = {sale.id: sale for sale in selected_sales}
     return_total = sum(float(sales_by_id[sale_id].price.amount) for sale_id in selected_ids)
     restock_count = sum(len(group['sale_ids']) for group in return_plan
                         if group['disposition'] == 'Reintegrar a inventario')
-    writeoff_count = len(selected_ids) - restock_count
+    review_count = len(selected_ids) - restock_count
     _render_cash_summary_cards((
         ('Unidades a devolver', str(len(selected_ids))),
         ('Total a reembolsar', _mxn(return_total)),
         ('Regresan al stock', str(restock_count)),
-        ('Se dan de baja', str(writeoff_count)),
+        ('A revisión de merma', str(review_count)),
     ))
     st.subheader('Autorización final')
     with st.form(f'return_transaction_form_{return_version}', enter_to_submit=False):
@@ -4343,12 +4405,12 @@ def _render_returns():
                 RepositoryFactory.get_operations_repository().audit(
                     'venta_devuelta', _actor_name(), 'sale', selected_id,
                     f'{len(returned)} artículos · {_mxn(amount)} · {refund_method} · '
-                    f'{restock_count} a stock · {writeoff_count} de baja · {clean_reason}')
+                    f'{restock_count} a stock · {review_count} a revisión · {clean_reason}')
                 _queue_activity_notice(
                     'Devolución registrada',
                     f'Reembolso de {_mxn(amount)} mediante {refund_method}. '
                     f'{restock_count} unidad(es) regresaron al stock y '
-                    f'{writeoff_count} quedaron dadas de baja.',
+                    f'{review_count} quedaron pendientes de revisión en Mermas.',
                     tone='warning', icon=':material/assignment_return:')
                 st.session_state.pop('return_draft', None)
                 _reset_form('return_transaction')

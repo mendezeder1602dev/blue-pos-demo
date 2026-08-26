@@ -1,10 +1,14 @@
 """Casos de uso transversales: Kardex, auditoría, clientes y ventas suspendidas."""
 
+import json
+
 from sqlalchemy import select
 
-from model.entity.models import AuditLog, Customer, HeldSale, HeldSaleItem, Product, StockMovement
+from model.entity.models import (AuditLog, Customer, HeldSale, HeldSaleItem, Product,
+                                 ReturnLossRequest, Sale, StockMovement)
 from model.util.monetary_types import CUPMoney
 from model.authorization import require_role
+from model.timezone import mexico_now
 
 
 class OperationsRepository:
@@ -75,6 +79,63 @@ class OperationsRepository:
         return list(self.__session.scalars(
             select(StockMovement).order_by(StockMovement.created_at.desc()).limit(limit)
         ).all())
+
+    def get_return_loss_requests(self, status=None):
+        """Lista artículos devueltos retenidos para dictamen de inventario."""
+        statement = select(ReturnLossRequest).order_by(
+            ReturnLossRequest.requested_at.desc())
+        if status:
+            statement = statement.where(ReturnLossRequest.status == status)
+        return list(self.__session.scalars(statement).all())
+
+    def resolve_return_loss_request(self, request_id, resolution, actor, notes=''):
+        """Autoriza la baja física o reintegra la devolución si finalmente es vendible."""
+        require_role('superuser')
+        if resolution not in ('Autorizar baja', 'Reintegrar a inventario'):
+            raise ValueError('Selecciona un dictamen válido.')
+        request = self.__session.get(ReturnLossRequest, int(request_id))
+        if request is None:
+            raise ValueError('La solicitud ya no existe.')
+        if request.status != 'Pendiente':
+            raise ValueError('La solicitud ya fue atendida.')
+        product = self.__session.get(Product, request.product_id)
+        if product is None:
+            raise ValueError('El producto ya no existe en el inventario.')
+        previous_stock = product.quantity
+        delta = 0
+        movement_type = 'Baja por devolución'
+        try:
+            if resolution == 'Reintegrar a inventario':
+                delta = request.quantity
+                product.quantity += delta
+                movement_type = 'Devolución reintegrada'
+                sale_ids = json.loads(request.sale_ids or '[]')
+                for sale in self.__session.scalars(
+                        select(Sale).where(Sale.id.in_(sale_ids))).all():
+                    sale.return_disposition = 'Reintegrado tras revisión'
+            request.status = ('Baja autorizada' if resolution == 'Autorizar baja'
+                              else 'Reintegrado')
+            request.resolved_by = actor
+            request.resolved_at = mexico_now()
+            request.resolution_notes = (notes or '').strip()
+            self.__session.add(StockMovement(
+                product_id=product.id, movement_type=movement_type, quantity=delta,
+                previous_stock=previous_stock, resulting_stock=product.quantity,
+                reason=(f'{request.concept}. {request.reason}. '
+                        f'Dictamen: {request.resolution_notes or resolution}'),
+                reference=request.transaction_id, performed_by=actor,
+            ))
+            self.__session.add(AuditLog(
+                event_type='devolucion_dictaminada', actor=actor,
+                entity_type='return_loss_request', entity_id=str(request.id),
+                detail=(f'{resolution}: {request.quantity} unidad(es) de '
+                        f'{request.product_name}. Ticket {request.transaction_id}.'),
+            ))
+            self.__session.commit()
+        except Exception:
+            self.__session.rollback()
+            raise
+        return request
 
     def hold_sale(self, label, notes, actor, cart, prices):
         """Guarda un carrito para continuarlo después sin modificar existencias."""

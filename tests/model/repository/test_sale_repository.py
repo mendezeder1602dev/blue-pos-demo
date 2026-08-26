@@ -1,5 +1,7 @@
 import unittest
 from datetime import date, timedelta
+from sqlalchemy import delete, select
+from model.entity.models import ReturnLossRequest
 from model.repository.exc.product import NonExistentProductException, NoPositivePriceException, NegativeCostException
 from model.repository.exc.sale import NoEnoughProductQuantityException, NonExistentSaleException, \
     ChangeProductIdInSaleException
@@ -21,6 +23,9 @@ class TestSaleRepository(unittest.TestCase):
         self.TODAY_DATE = date.today()
 
     def tearDown(self):
+        session = self.sale_repository._SaleRepository__session
+        session.execute(delete(ReturnLossRequest))
+        session.commit()
         RepositoryFactory.close_session()
         delete_all_products_from_database()
 
@@ -74,7 +79,7 @@ class TestSaleRepository(unittest.TestCase):
         self.assertEqual(statuses.count('Devuelta'), 2)
         self.assertEqual(statuses.count('Completada'), 1)
 
-    def test_writeoff_return_does_not_increase_sellable_stock(self):
+    def test_damaged_return_creates_review_without_increasing_sellable_stock(self):
         product = ProductGenerator.generate_one_product()
         product.quantity = 3
         product = insert_product_and_return_it(product)
@@ -85,12 +90,19 @@ class TestSaleRepository(unittest.TestCase):
 
         returned = self.sale_repository.return_items(
             sale.transaction_id,
-            [{'sale_ids': [sold_unit.id], 'disposition': 'Dar de baja'}],
+            [{'sale_ids': [sold_unit.id],
+              'disposition': 'Enviar a revisión de merma',
+              'concept': 'Producto dañado o no funciona'}],
             'Producto dañado confirmado', 'Vale')
 
         self.assertEqual(len(returned), 1)
         self.assertEqual(get_one_product_from_database().quantity, 2)
-        self.assertEqual(returned[0].return_disposition, 'Dar de baja')
+        self.assertEqual(returned[0].return_disposition, 'Enviar a revisión de merma')
+        request = self.sale_repository._SaleRepository__session.scalar(
+            select(ReturnLossRequest))
+        self.assertEqual(request.status, 'Pendiente')
+        self.assertEqual(request.quantity, 1)
+        self.assertEqual(request.concept, 'Producto dañado o no funciona')
 
     def test_sale_insertion_with_no_enough_products_raises_exception(self):
         product = ProductGenerator.generate_one_product()

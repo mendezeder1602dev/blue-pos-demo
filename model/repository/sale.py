@@ -1,11 +1,12 @@
 """Persistencia transaccional de tickets, devoluciones y existencias vendidas."""
 
+import json
 from datetime import date, datetime
 from uuid import uuid4
 
 from sqlalchemy import update, select, delete, cast, Numeric, asc, desc, Float, func
 
-from model.entity.models import Product, Sale, StockMovement
+from model.entity.models import Product, ReturnLossRequest, Sale, StockMovement
 from sqlalchemy.orm import Session, aliased
 
 from model.repository.exc.product import NonExistentProductException, NoPositivePriceException, NegativeCostException
@@ -253,8 +254,9 @@ class SaleRepository(RepositoryObserver):
         if refund_method not in ('Efectivo', 'Tarjeta', 'Transferencia', 'Vale'):
             raise ValueError('Selecciona un método de reembolso válido.')
 
-        allowed_dispositions = ('Reintegrar a inventario', 'Dar de baja')
+        allowed_dispositions = ('Reintegrar a inventario', 'Enviar a revisión de merma')
         selected = []
+        groups = []
         seen_ids = set()
         for group in return_plan or []:
             disposition = group.get('disposition')
@@ -266,6 +268,7 @@ class SaleRepository(RepositoryObserver):
                     raise ValueError('La selección contiene unidades duplicadas.')
                 seen_ids.add(sale_id)
                 selected.append((sale_id, disposition))
+            groups.append(group)
         if not selected:
             raise ValueError('Selecciona al menos una unidad para devolver.')
 
@@ -305,6 +308,25 @@ class SaleRepository(RepositoryObserver):
                     previous_stock=previous_stock, resulting_stock=product.quantity,
                     reason=f'Reintegración por devolución: {reason}',
                     reference=transaction_id, performed_by=actor,
+                ))
+            for group in groups:
+                if group.get('disposition') != 'Enviar a revisión de merma':
+                    continue
+                group_sale_ids = [int(sale_id) for sale_id in group.get('sale_ids', [])]
+                if not group_sale_ids:
+                    continue
+                sample_sale = sales_by_id[group_sale_ids[0]]
+                self.__session.add(ReturnLossRequest(
+                    transaction_id=transaction_id,
+                    product_id=sample_sale.product_id,
+                    product_name=(sample_sale.product_name
+                                  or group.get('product_name')
+                                  or f'Producto #{sample_sale.product_id}'),
+                    quantity=len(group_sale_ids),
+                    sale_ids=json.dumps(group_sale_ids),
+                    concept=str(group.get('concept') or 'Producto no apto para venta'),
+                    reason=reason,
+                    requested_by=actor,
                 ))
             self.__session.commit()
         except Exception:
