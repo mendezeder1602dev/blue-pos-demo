@@ -36,7 +36,8 @@ from reportlab.graphics.shapes import Drawing
 
 # Los secretos de Streamlit deben exponerse antes de importar la fábrica de datos.
 try:
-    for _secret_name in ('BLUE_POS_DATABASE_URL', 'BLUE_POS_AUTH_DATABASE_URL'):
+    for _secret_name in ('BLUE_POS_DATABASE_URL', 'BLUE_POS_AUTH_DATABASE_URL',
+                         'GROQ_API_KEY', 'GROQ_SUPPORT_MODEL'):
         if _secret_name in st.secrets:
             os.environ[_secret_name] = str(st.secrets[_secret_name])
 except FileNotFoundError:
@@ -44,6 +45,9 @@ except FileNotFoundError:
 
 from model import economy, schema
 from model.help_assistant import find_answer, topics_for_role
+from model.online_support import (
+    OnlineSupportError, ask_online_support, is_available as online_support_available,
+)
 from model.inventory_excel import (
     ACTION_ADD, ACTION_CREATE, ACTION_REPLACE, ACTION_SKIP, IMPORT_ACTIONS,
     build_import_preview, generate_inventory_template, read_inventory_workbook,
@@ -65,11 +69,12 @@ from model.report.exports import (
     generate_pdf_bytes as _generate_pdf_bytes,
 )
 from model.report.ticket import generate_thermal_ticket_bytes as _generate_thermal_ticket_bytes
+from model.report.thermal_printer import build_escpos_ticket, print_raw_ticket
 from model.util.monetary_types import CUPMoney
 from model.timezone import mexico_now, mexico_today
 
 LOW_STOCK_THRESHOLD = 5
-PAYMENT_METHODS = ('Efectivo', 'Transferencia', 'Tarjeta')
+PAYMENT_METHODS = ('Efectivo', 'Transferencia', 'Tarjeta', 'Vale')
 MONTH_NAMES = ('', 'Enero', 'Febrero', 'Marzo', 'Abril', 'Mayo', 'Junio',
                'Julio', 'Agosto', 'Septiembre', 'Octubre', 'Noviembre', 'Diciembre')
 DESCRIPTION_LABEL = 'Descripción'
@@ -132,6 +137,29 @@ def _thermal_ticket_download(business, folio, created_at, items, payment_method,
     return lambda: _cached_thermal_ticket(
         business, folio, created_at, items, payment_method, payment_details,
         customer, paper_width_mm, ticket_title)
+
+
+def _print_thermal_ticket(business, folio, created_at, items, payment_method,
+                          payment_details='', customer='', paper_width_mm=58,
+                          ticket_title='TICKET DE VENTA', barcode=''):
+    """Imprime una sola copia directa, sin visor PDF ni tamaño de hoja fijo."""
+    raw_ticket = build_escpos_ticket(
+        business, folio, created_at, items, payment_method, payment_details,
+        customer, paper_width_mm, ticket_title, barcode)
+    return print_raw_ticket(raw_ticket, f'Ticket {folio}')
+
+
+def _print_replacement_voucher(voucher, paper_width_mm=58):
+    """Imprime el nuevo código que conserva el remanente de un vale consumido."""
+    amount = float(voucher.balance.amount)
+    return _print_thermal_ticket(
+        _business_export_data(), voucher.code, voucher.issued_at,
+        ({'name': 'Saldo restante de vale', 'quantity': 1, 'unit_price': amount},),
+        'NUEVO VALE POR REMANENTE',
+        f'Código anterior agotado | Saldo disponible: {_mxn(amount)}',
+        voucher.customer or 'Público general', paper_width_mm,
+        'VALE DE SALDO A FAVOR', voucher.code,
+    )
 
 
 def _mxn(value):
@@ -624,6 +652,14 @@ def _get_out_of_stock_products():
             if not product.is_temporary and product.quantity <= 0]
 
 
+def _sellable_products():
+    """Productos activos con existencia que pueden entregarse como reemplazo."""
+    return [
+        product for product in RepositoryFactory.get_product_repository().get_all_products()
+        if product.is_active and not product.is_temporary and product.quantity > 0
+    ]
+
+
 def _business_export_data():
     profile = RepositoryFactory.get_business_profile_repository().get_profile()
     return business_as_dict(profile)
@@ -783,6 +819,90 @@ def _payment_controls(prefix, total):
         if not transfer_reference:
             validation_error = 'Captura la referencia o clave de rastreo de la transferencia.'
         details.extend([f'Banco: {bank}', f'Referencia: {transfer_reference}'])
+    elif method == 'Vale':
+        voucher_code = st.text_input(
+            'Escanea o captura el vale', placeholder='VALE-XXXX-XXXX-XXXX-XXXX',
+            key=f'{prefix}_voucher_code').strip().upper()
+        applied = 0.0
+        if voucher_code:
+            try:
+                voucher = RepositoryFactory.get_store_credit_repository().find_active(voucher_code)
+                balance = float(voucher.balance.amount)
+                applied = min(balance, float(total))
+                st.success(f'Saldo disponible: {_mxn(balance)} · Se aplicarán {_mxn(applied)}')
+                remainder = max(0.0, float(total) - applied)
+                if remainder:
+                    st.metric('Importe por completar', _mxn(remainder))
+                    complement = st.segmented_control(
+                        '¿Cómo pagará el resto?', ('Efectivo', 'Tarjeta', 'Transferencia'),
+                        default='Efectivo', selection_mode='single', width='stretch',
+                        key=f'{prefix}_voucher_complement',
+                    ) or 'Efectivo'
+                    if complement == 'Efectivo':
+                        received = st.number_input(
+                            'Efectivo recibido para completar', min_value=0.0, step=10.0,
+                            value=float(remainder), format='%.2f', key=f'{prefix}_voucher_cash')
+                        if received < remainder:
+                            validation_error = f'Faltan {_mxn(remainder - received)}.'
+                        details.extend([
+                            f'Complemento en efectivo: {_mxn(remainder)}',
+                            f'Recibido en efectivo: {_mxn(received)}',
+                            f'Cambio: {_mxn(max(0, received - remainder))}',
+                        ])
+                    elif complement == 'Tarjeta':
+                        st.caption(
+                            'Registra sólo los datos de referencia; nunca el número completo ni el CVV.')
+                        card_type = st.segmented_control(
+                            'Tipo de tarjeta', ('Débito', 'Crédito'), default='Débito',
+                            selection_mode='single', width='stretch',
+                            key=f'{prefix}_voucher_card_type',
+                        ) or 'Débito'
+                        card_columns = st.columns(2)
+                        last_four = card_columns[0].text_input(
+                            'Últimos 4 dígitos', max_chars=4, placeholder='0000',
+                            key=f'{prefix}_voucher_card_last4').strip()
+                        authorization = card_columns[1].text_input(
+                            'Autorización', placeholder='Folio del voucher',
+                            key=f'{prefix}_voucher_card_auth').strip()
+                        if len(last_four) != 4 or not last_four.isdigit():
+                            validation_error = 'Captura los 4 últimos dígitos de la tarjeta.'
+                        details.extend([
+                            f'Complemento con tarjeta: {_mxn(remainder)}',
+                            f'Tarjeta: {card_type}', f'Terminación: {last_four}',
+                        ])
+                        if authorization:
+                            details.append(f'Autorización: {authorization}')
+                    else:
+                        transfer_columns = st.columns(2)
+                        bank = transfer_columns[0].selectbox(
+                            'Banco receptor', ('BBVA', 'Banamex', 'Santander', 'Banorte',
+                                               'HSBC', 'Banco Azteca', 'Mercado Pago', 'Otro'),
+                            key=f'{prefix}_voucher_transfer_bank')
+                        transfer_reference = transfer_columns[1].text_input(
+                            'Referencia', placeholder='Folio o clave de rastreo',
+                            key=f'{prefix}_voucher_transfer_reference').strip()
+                        if not transfer_reference:
+                            validation_error = (
+                                'Captura la referencia o clave de rastreo de la transferencia.')
+                        details.extend([
+                            f'Complemento por transferencia: {_mxn(remainder)}',
+                            f'Banco: {bank}', f'Referencia: {transfer_reference}',
+                        ])
+                    method = f'Vale + {complement}'
+                remaining_balance = max(0.0, balance - applied)
+                details.extend([
+                    f'Vale: {voucher_code}', f'Aplicado: {_mxn(applied)}',
+                    f'Nuevo vale por remanente: {_mxn(remaining_balance)}',
+                ])
+                if remaining_balance:
+                    st.info(
+                        f'Se emitirá un vale nuevo por {_mxn(remaining_balance)}; '
+                        'el código actual quedará agotado.')
+            except Exception as error:
+                validation_error = str(error)
+        else:
+            validation_error = 'Escanea o captura el código del vale.'
+        st.session_state[f'{prefix}_voucher_applied'] = applied
     else:
         st.metric('Total a pagar', _mxn(total))
         cash_key = f'{prefix}_cash_received'
@@ -841,6 +961,85 @@ def _clear_cart():
         st.session_state.pop(f'cart_qty_{product_id}', None)
     st.session_state.pos_cart = {}
     st.session_state.pos_cart_prices = {}
+
+
+def _render_voucher_history(prefix, expanded=False):
+    """Resumen, búsqueda y reimpresión sin crear saldos duplicados."""
+    repository = RepositoryFactory.get_store_credit_repository()
+    vouchers = repository.get_all()
+    active = [voucher for voucher in vouchers if voucher.status == 'Activo']
+    exhausted = [voucher for voucher in vouchers if voucher.status == 'Agotado']
+    if active:
+        pending_total = sum(float(voucher.balance.amount) for voucher in active)
+        st.info(
+            f'**{len(active)} vale(s) pendiente(s) por {_mxn(pending_total)}.** '
+            'Escanea el código al cobrar o consulta el historial.')
+    with st.expander(
+        f'Historial de vales · {len(active)} activos · {len(exhausted)} cobrados',
+        expanded=expanded, icon=':material/redeem:',
+    ):
+        if not vouchers:
+            st.caption('Todavía no se han emitido vales.')
+            return
+        status = st.segmented_control(
+            'Estado', ('Todos', 'Por cobrar', 'Cobrados'), default='Todos',
+            required=True, key=f'{prefix}_voucher_status')
+        query = st.text_input(
+            'Buscar vale', placeholder='Código, cliente o folio original',
+            key=f'{prefix}_voucher_search').strip().casefold()
+        visible = [voucher for voucher in vouchers if (
+            status == 'Todos'
+            or (status == 'Por cobrar' and voucher.status == 'Activo')
+            or (status == 'Cobrados' and voucher.status == 'Agotado')
+        ) and (not query or query in ' '.join((
+            voucher.code, voucher.customer or '', voucher.original_transaction_id,
+        )).casefold())]
+        st.dataframe([{
+            'Vale': voucher.code,
+            'Estado': 'Por cobrar' if voucher.status == 'Activo' else 'Cobrado',
+            'Valor inicial': float(voucher.initial_amount.amount),
+            'Saldo': float(voucher.balance.amount),
+            'Cliente': voucher.customer or 'Público general',
+            'Emisión': voucher.issued_at.strftime('%d/%m/%Y %H:%M'),
+        } for voucher in visible], hide_index=True, width='stretch')
+        if not visible:
+            return
+        labels = {
+            f'{voucher.code} · {_mxn(voucher.balance.amount)} · {voucher.status}': voucher
+            for voucher in visible
+        }
+        selected = labels[st.selectbox(
+            'Detalle del vale', tuple(labels), key=f'{prefix}_voucher_detail')]
+        movements = repository.get_movements(selected.id)
+        st.caption(
+            f'Venta original: {selected.original_transaction_id} · '
+            f'Emitido por: {selected.issued_by} · {selected.reason}')
+        st.dataframe([{
+            'Fecha': movement.created_at.strftime('%d/%m/%Y %H:%M'),
+            'Movimiento': movement.movement_type,
+            'Importe': float(movement.amount.amount),
+            'Venta': movement.sale_transaction_id or '—',
+            'Responsable': movement.performed_by,
+        } for movement in movements], hide_index=True, width='stretch')
+        if selected.status == 'Activo':
+            width = st.segmented_control(
+                'Papel para reimprimir', (58, 80), default=58, required=True,
+                format_func=lambda value: f'{value} mm',
+                key=f'{prefix}_voucher_width')
+            if st.button(
+                'Reimprimir el mismo vale', icon=':material/print:',
+                key=f'{prefix}_voucher_reprint', type='primary'):
+                try:
+                    printer = _print_thermal_ticket(
+                        _business_export_data(), selected.code, selected.issued_at,
+                        ({'name': 'Saldo a favor por devolución', 'quantity': 1,
+                          'unit_price': float(selected.initial_amount.amount)},),
+                        'VALE DE SALDO A FAVOR',
+                        f'Código: {selected.code} | Saldo: {_mxn(selected.balance.amount)}',
+                        selected.customer, width, 'VALE DE SALDO A FAVOR', selected.code)
+                    st.success(f'Vale enviado a {printer}. El saldo no fue modificado.')
+                except Exception as error:
+                    st.error(f'No se pudo reimprimir: {error}')
 
 def _render_sales():
     _hero('Punto de venta', 'Agrega productos al carrito y completa el cobro desde una sola pantalla.', 'CAJA · TURNO ACTIVO')
@@ -1081,10 +1280,22 @@ def _render_sales():
                     f'checkout_{checkout_version}', total)
                 sale_date = mexico_today()
                 st.caption(f'Fecha y jornada de venta: {sale_date}')
-                submitted = st.button(
-                    f'Cobrar {_mxn(total)}', type='primary', width='stretch',
-                    icon=':material/payments:', key=f'checkout_submit_{checkout_version}',
+                checkout_print_width = st.segmented_control(
+                    'Papel del ticket', (58, 80), default=58, required=True,
+                    key='checkout_direct_print_width',
+                    format_func=lambda width: f'{width} mm', width='content',
+                    persist_state='session',
                 )
+                charge_and_print = st.button(
+                    f'Cobrar e imprimir · {_mxn(total)}', type='primary',
+                    width='stretch', icon=':material/print:',
+                    key=f'checkout_print_submit_{checkout_version}',
+                )
+                charge_only = st.button(
+                    'Solo cobrar', width='stretch', icon=':material/payments:',
+                    key=f'checkout_submit_{checkout_version}',
+                )
+                submitted = charge_and_print or charge_only
 
                 clear_column, suspend_column = st.columns(2)
                 if clear_column.button('Vaciar', width='stretch', icon=':material/delete_sweep:'):
@@ -1126,16 +1337,75 @@ def _render_sales():
                                 customer=sale_customer,
                             )
                             transaction_entries.append((sale, int(quantity)))
-                        inserted = sale_repository.insert_transaction(transaction_entries)
+                        voucher_code = (st.session_state.get(
+                            f'checkout_{checkout_version}_voucher_code', '')
+                            if payment_method.startswith('Vale') else '')
+                        voucher_applied = (st.session_state.get(
+                            f'checkout_{checkout_version}_voucher_applied', 0.0)
+                            if voucher_code else 0.0)
+                        inserted = sale_repository.insert_transaction(
+                            transaction_entries, voucher_code, voucher_applied, _actor_name())
                         RepositoryFactory.get_operations_repository().audit(
                             'venta_registrada', _actor_name(), 'sale', inserted[0].transaction_id,
                             f'{item_count} artículos · {_mxn(total)} · {payment_method}')
+                        replacement_status = ''
+                        try:
+                            replacement_voucher = (
+                                RepositoryFactory.get_store_credit_repository()
+                                .find_replacement_for_sale(inserted[0].transaction_id)
+                                if voucher_code else None)
+                        except Exception as lookup_error:
+                            replacement_voucher = None
+                            replacement_status = (
+                                ' Venta guardada; no se pudo consultar el nuevo vale: '
+                                f'{lookup_error}')
+                        if replacement_voucher is not None:
+                            try:
+                                replacement_printer = _print_replacement_voucher(
+                                    replacement_voucher, checkout_print_width)
+                                replacement_status = (
+                                    f' Nuevo vale {replacement_voucher.code} por '
+                                    f'{_mxn(replacement_voucher.balance.amount)} impreso en '
+                                    f'{replacement_printer}.')
+                            except Exception as replacement_error:
+                                replacement_status = (
+                                    f' El nuevo vale {replacement_voucher.code} por '
+                                    f'{_mxn(replacement_voucher.balance.amount)} fue creado, pero '
+                                    f'no pudo imprimirse: {replacement_error}')
+                        notice_title = ('Venta registrada correctamente'
+                                        if charge_and_print
+                                        else 'Venta cobrada sin imprimir')
+                        notice_icon = ':material/receipt_long:'
+                        print_status = ('' if charge_and_print else
+                                        ' Cobro confirmado; no se envió ningún ticket.')
+                        if charge_and_print:
+                            thermal_items = tuple({
+                                'name': product_by_id[product_id].name,
+                                'quantity': int(quantity),
+                                'unit_price': st.session_state.pos_cart_prices.get(
+                                    product_id,
+                                    float(product_by_id[product_id].price.amount)),
+                            } for product_id, quantity in cart.items())
+                            try:
+                                printer = _print_thermal_ticket(
+                                    _business_export_data(), _sale_folio(inserted[0].id),
+                                    inserted[0].created_at or mexico_now(), thermal_items,
+                                    payment_method or 'Efectivo', payment_details,
+                                    sale_customer, checkout_print_width)
+                                print_status = f' Ticket enviado a {printer}.'
+                            except Exception as print_error:
+                                notice_title = 'Venta cobrada; impresión pendiente'
+                                notice_icon = ':material/warning:'
+                                print_status = (
+                                    f' No se pudo imprimir: {print_error} '
+                                    'Puedes reimprimir desde Movimientos recientes.')
+                        print_status += replacement_status
                         _clear_cart()
                         _queue_activity_notice(
-                            'Venta registrada correctamente',
+                            notice_title,
                             f'Folio {_sale_folio(inserted[0].id)} · {item_count} '
-                            f'artículo(s) · {_mxn(total)} · {payment_method}.',
-                            icon=':material/receipt_long:')
+                            f'artículo(s) · {_mxn(total)} · {payment_method}.'
+                            f'{print_status}', icon=notice_icon)
                         _reset_form('checkout')
                         st.rerun()
                     except Exception as error:
@@ -1189,29 +1459,58 @@ def _render_sales():
                     'name': name, 'quantity': line['quantity'],
                     'unit_price': line['total'] / line['quantity'],
                 } for name, line in product_lines.items())
-                ticket_actions = st.columns(2)
-                ticket_actions[0].download_button(
-                    'Ticket térmico 58 mm',
-                    _thermal_ticket_download(
-                        business, commercial_folio, first_sale.created_at or first_sale.date,
-                        thermal_items, first_sale.payment_method or 'Sin método',
-                        first_sale.payment_details or '',
-                        first_sale.customer or 'Público general', 58),
-                    f'ticket-{commercial_folio}-58mm.pdf', 'application/pdf',
-                    key=f'ticket_58_{first_sale.id}', icon=':material/receipt_long:',
-                    width='stretch',
-                )
-                ticket_actions[1].download_button(
-                    'Ticket térmico 80 mm',
-                    _thermal_ticket_download(
-                        business, commercial_folio, first_sale.created_at or first_sale.date,
-                        thermal_items, first_sale.payment_method or 'Sin método',
-                        first_sale.payment_details or '',
-                        first_sale.customer or 'Público general', 80),
-                    f'ticket-{commercial_folio}-80mm.pdf', 'application/pdf',
-                    key=f'ticket_80_{first_sale.id}', icon=':material/receipt_long:',
-                    width='stretch',
-                )
+                st.caption('Impresión térmica')
+                with st.container(
+                    horizontal=True, vertical_alignment='bottom', gap='small',
+                    key=f'direct_print_actions_{first_sale.id}',
+                ):
+                    direct_width = st.segmented_control(
+                        'Ancho de papel', (58, 80), default=58, required=True,
+                        key=f'print_width_{first_sale.id}',
+                        format_func=lambda width: f'{width} mm',
+                        width='content',
+                    )
+                    print_now = st.button(
+                        'Imprimir ahora', key=f'print_ticket_{first_sale.id}',
+                        icon=':material/print:', type='primary', width='content',
+                        help='Envía una copia a la impresora térmica predeterminada.',
+                    )
+                if print_now:
+                    try:
+                        printer = _print_thermal_ticket(
+                            business, commercial_folio,
+                            first_sale.created_at or first_sale.date, thermal_items,
+                            first_sale.payment_method or 'Sin método',
+                            first_sale.payment_details or '',
+                            first_sale.customer or 'Público general', direct_width)
+                        st.success(f'Ticket enviado a {printer}.')
+                    except Exception as exc:
+                        st.error(f'No se pudo imprimir: {exc}')
+                with st.container(horizontal=True, gap='small'):
+                    st.download_button(
+                        'PDF 58 mm',
+                        _thermal_ticket_download(
+                            business, commercial_folio,
+                            first_sale.created_at or first_sale.date, thermal_items,
+                            first_sale.payment_method or 'Sin método',
+                            first_sale.payment_details or '',
+                            first_sale.customer or 'Público general', 58),
+                        f'ticket-{commercial_folio}-58mm.pdf', 'application/pdf',
+                        key=f'ticket_58_{first_sale.id}',
+                        icon=':material/download:', width='content',
+                    )
+                    st.download_button(
+                        'PDF 80 mm',
+                        _thermal_ticket_download(
+                            business, commercial_folio,
+                            first_sale.created_at or first_sale.date, thermal_items,
+                            first_sale.payment_method or 'Sin método',
+                            first_sale.payment_details or '',
+                            first_sale.customer or 'Público general', 80),
+                        f'ticket-{commercial_folio}-80mm.pdf', 'application/pdf',
+                        key=f'ticket_80_{first_sale.id}',
+                        icon=':material/download:', width='content',
+                    )
                 if _is_administrator():
                     reversal_reason = st.text_input(
                         'Motivo de anulación', key=f'undo_reason_{first_sale.id}',
@@ -1965,6 +2264,7 @@ def _render_express_sale():
           'VENDEDOR · COBRO RÁPIDO')
     if not _require_open_cash_for_sale():
         return
+    _render_voucher_history('sales', expanded=False)
     express_version = _form_version('express_sale')
     st.info('La venta aparecerá en reportes. Solo se agregará al inventario si lo indicas.',
             icon=':material/bolt:')
@@ -2005,27 +2305,54 @@ def _render_express_sale():
                 'quantity': last_ticket['quantity'],
                 'unit_price': last_ticket['unit_price'],
             },)
-            ticket_actions = st.columns(2)
-            ticket_actions[0].download_button(
-                'Ticket térmico 58 mm',
-                _thermal_ticket_download(
-                    business, last_ticket['folio'], last_ticket['created_at'],
-                    thermal_items, last_ticket['payment_method'],
-                    last_ticket['payment_details'], '', 58, 'TICKET DE VENTA EXPRÉS'),
-                f"ticket-express-{last_ticket['folio']}-58mm.pdf",
-                'application/pdf', key='express_ticket_pdf',
-                icon=':material/receipt_long:', width='stretch',
-            )
-            ticket_actions[1].download_button(
-                'Ticket térmico 80 mm',
-                _thermal_ticket_download(
-                    business, last_ticket['folio'], last_ticket['created_at'],
-                    thermal_items, last_ticket['payment_method'],
-                    last_ticket['payment_details'], '', 80, 'TICKET DE VENTA EXPRÉS'),
-                f"ticket-express-{last_ticket['folio']}-80mm.pdf",
-                'application/pdf', key='express_ticket_excel',
-                icon=':material/receipt_long:', width='stretch',
-            )
+            st.caption('Impresión térmica')
+            with st.container(
+                horizontal=True, vertical_alignment='bottom', gap='small',
+                key='express_direct_print_actions',
+            ):
+                direct_width = st.segmented_control(
+                    'Ancho de papel', (58, 80), default=58, required=True,
+                    key='express_print_width',
+                    format_func=lambda width: f'{width} mm', width='content',
+                )
+                print_now = st.button(
+                    'Imprimir ahora', key='express_ticket_print',
+                    icon=':material/print:', type='primary', width='content',
+                    help='Envía una copia a la impresora térmica predeterminada.',
+                )
+            if print_now:
+                try:
+                    printer = _print_thermal_ticket(
+                        business, last_ticket['folio'], last_ticket['created_at'],
+                        thermal_items, last_ticket['payment_method'],
+                        last_ticket['payment_details'], '', direct_width,
+                        'TICKET DE VENTA EXPRÉS')
+                    st.success(f'Ticket enviado a {printer}.')
+                except Exception as exc:
+                    st.error(f'No se pudo imprimir: {exc}')
+            with st.container(horizontal=True, gap='small'):
+                st.download_button(
+                    'PDF 58 mm',
+                    _thermal_ticket_download(
+                        business, last_ticket['folio'], last_ticket['created_at'],
+                        thermal_items, last_ticket['payment_method'],
+                        last_ticket['payment_details'], '', 58,
+                        'TICKET DE VENTA EXPRÉS'),
+                    f"ticket-express-{last_ticket['folio']}-58mm.pdf",
+                    'application/pdf', key='express_ticket_pdf',
+                    icon=':material/download:', width='content',
+                )
+                st.download_button(
+                    'PDF 80 mm',
+                    _thermal_ticket_download(
+                        business, last_ticket['folio'], last_ticket['created_at'],
+                        thermal_items, last_ticket['payment_method'],
+                        last_ticket['payment_details'], '', 80,
+                        'TICKET DE VENTA EXPRÉS'),
+                    f"ticket-express-{last_ticket['folio']}-80mm.pdf",
+                    'application/pdf', key='express_ticket_excel',
+                    icon=':material/download:', width='content',
+                )
     name = st.text_input(
         'Artículo o servicio', placeholder='Ej. Entrega especial',
         key=f'express_name_{express_version}')
@@ -2051,8 +2378,19 @@ def _render_express_sale():
                 f'<strong>{_mxn(total)}</strong></div>', unsafe_allow_html=True)
     payment_method, payment_details, payment_error = _payment_controls(
         f'express_{express_version}', total)
-    submitted = st.button(f'Cobrar {_mxn(total)}', type='primary', width='stretch',
-                          icon=':material/bolt:', key=f'express_submit_{express_version}')
+    express_checkout_width = st.segmented_control(
+        'Papel del ticket', (58, 80), default=58, required=True,
+        key='express_checkout_print_width',
+        format_func=lambda width: f'{width} mm', width='content',
+        persist_state='session',
+    )
+    charge_and_print = st.button(
+        f'Cobrar e imprimir · {_mxn(total)}', type='primary', width='stretch',
+        icon=':material/print:', key=f'express_print_submit_{express_version}')
+    charge_only = st.button(
+        'Solo cobrar', width='stretch', icon=':material/payments:',
+        key=f'express_submit_{express_version}')
+    submitted = charge_and_print or charge_only
     if submitted:
         if payment_error:
             st.error(payment_error, icon=':material/error:')
@@ -2073,8 +2411,14 @@ def _render_express_sale():
             sale = Sale(product_id=product.id, price=product.price, cost=product.cost,
                         date=mexico_today(), payment_method=payment_method or 'Efectivo',
                         payment_details=payment_details)
+            voucher_code = (st.session_state.get(
+                f'express_{express_version}_voucher_code', '')
+                if payment_method.startswith('Vale') else '')
+            voucher_applied = (st.session_state.get(
+                f'express_{express_version}_voucher_applied', 0.0)
+                if voucher_code else 0.0)
             inserted_sales = RepositoryFactory.get_sale_repository().insert_sales(
-                sale, int(quantity))
+                sale, int(quantity), voucher_code, voucher_applied, _actor_name())
             first_sale = inserted_sales[0]
             st.session_state.express_last_ticket = {
                 'folio': _sale_folio(first_sale.id),
@@ -2094,10 +2438,57 @@ def _render_express_sale():
                 first_sale.transaction_id or first_sale.id,
                 f'{clean_name} · {int(quantity)} artículo(s) · {_mxn(total)} · '
                 f'{payment_method or "Efectivo"}')
+            replacement_status = ''
+            try:
+                replacement_voucher = (
+                    RepositoryFactory.get_store_credit_repository()
+                    .find_replacement_for_sale(first_sale.transaction_id)
+                    if voucher_code else None)
+            except Exception as lookup_error:
+                replacement_voucher = None
+                replacement_status = (
+                    ' Venta guardada; no se pudo consultar el nuevo vale: '
+                    f'{lookup_error}')
+            if replacement_voucher is not None:
+                try:
+                    replacement_printer = _print_replacement_voucher(
+                        replacement_voucher, express_checkout_width)
+                    replacement_status = (
+                        f' Nuevo vale {replacement_voucher.code} por '
+                        f'{_mxn(replacement_voucher.balance.amount)} impreso en '
+                        f'{replacement_printer}.')
+                except Exception as replacement_error:
+                    replacement_status = (
+                        f' El nuevo vale {replacement_voucher.code} por '
+                        f'{_mxn(replacement_voucher.balance.amount)} fue creado, pero '
+                        f'no pudo imprimirse: {replacement_error}')
+            notice_title = ('Venta express registrada'
+                            if charge_and_print
+                            else 'Venta express cobrada sin imprimir')
+            notice_icon = ':material/bolt:'
+            print_status = ('' if charge_and_print else
+                            ' Cobro confirmado; no se envió ningún ticket.')
+            if charge_and_print:
+                try:
+                    printer = _print_thermal_ticket(
+                        _business_export_data(), _sale_folio(first_sale.id),
+                        st.session_state.express_last_ticket['created_at'], ({
+                            'name': clean_name, 'quantity': int(quantity),
+                            'unit_price': float(unit_price),
+                        },), payment_method or 'Efectivo', payment_details, '',
+                        express_checkout_width, 'TICKET DE VENTA EXPRÉS')
+                    print_status = f' Ticket enviado a {printer}.'
+                except Exception as print_error:
+                    notice_title = 'Venta cobrada; impresión pendiente'
+                    notice_icon = ':material/warning:'
+                    print_status = (
+                        f' No se pudo imprimir: {print_error} '
+                        'Puedes reimprimir el ticket mostrado arriba.')
+            print_status += replacement_status
             _queue_activity_notice(
-                'Venta express registrada',
+                notice_title,
                 f'{message} Total cobrado: {_mxn(total)} mediante '
-                f'{payment_method or "Efectivo"}.', icon=':material/bolt:')
+                f'{payment_method or "Efectivo"}.{print_status}', icon=notice_icon)
             _reset_form('express_sale')
             st.rerun()
         except (UniqueProductNameException, UniqueProductBarcodeException) as error:
@@ -2589,6 +2980,12 @@ def _summary_for_range(initial_date: date, final_date: date):
 def _cash_close_summary(close_date: date, opening=None, closed_at=None):
     """Resume el día completo o exclusivamente el intervalo de un turno."""
     result = _summary_for_range(close_date, close_date)
+    # El corte concilia cobros brutos y salidas físicas. Una venta devuelta el
+    # mismo día conserva su cobro original; el reembolso en efectivo aparece
+    # separadamente como movimiento de retiro.
+    returned_sales = RepositoryFactory.get_sale_repository().get_returned_sales_between(
+        close_date, close_date)
+    result['sales'] = list(result['sales']) + returned_sales
     if opening is not None:
         start_at = opening.created_at
 
@@ -2614,18 +3011,35 @@ def _cash_close_summary(close_date: date, opening=None, closed_at=None):
         })
     totals = {'Efectivo': 0.0, 'Tarjeta': 0.0, 'Transferencia': 0.0, 'Otros': 0.0}
     operations = set()
+    grouped_sales = {}
     for sale in result['sales']:
-        amount = float(sale.price.amount)
-        method = (sale.payment_method or '').strip().lower()
+        grouped_sales.setdefault(sale.transaction_id or f'legacy-{sale.id}', []).append(sale)
+    for operation_id, operation_sales in grouped_sales.items():
+        amount = sum(float(sale.price.amount) for sale in operation_sales)
+        method = (operation_sales[0].payment_method or '').strip().lower()
         if method == 'efectivo' or method == 'cash':
             totals['Efectivo'] += amount
         elif method == 'tarjeta':
             totals['Tarjeta'] += amount
         elif method == 'transferencia':
             totals['Transferencia'] += amount
+        elif method.startswith('vale + '):
+            details = operation_sales[0].payment_details or ''
+            match = re.search(
+                r'Aplicado:\s*\$([\d,]+(?:\.\d{1,2})?)', details)
+            voucher_part = float(match.group(1).replace(',', '')) if match else 0.0
+            voucher_part = min(amount, max(0.0, voucher_part))
+            complement_part = max(0.0, amount - voucher_part)
+            complement_method = method.removeprefix('vale + ').strip()
+            destination = {
+                'efectivo': 'Efectivo', 'tarjeta': 'Tarjeta',
+                'transferencia': 'Transferencia',
+            }.get(complement_method, 'Otros')
+            totals[destination] += complement_part
+            totals['Otros'] += voucher_part
         else:
             totals['Otros'] += amount
-        operations.add(sale.transaction_id or f'legacy-{sale.id}')
+        operations.add(operation_id)
     return result, totals, len(operations)
 
 
@@ -2854,22 +3268,42 @@ def _render_cash_opening():
                f'{opening.notes or "Sin nota"}')
 
     if estimated_cash > float(opening.cash_limit.amount) and existing_close is None:
+        excess_cash = estimated_cash - float(opening.cash_limit.amount)
         st.error(f'La caja supera el límite recomendado por '
-                 f'{_mxn(estimated_cash - float(opening.cash_limit.amount))}. '
+                 f'{_mxn(excess_cash)}. '
                  'Conviene realizar un retiro de seguridad.', icon=':material/security:')
+        if is_admin:
+            st.button(
+                'Realizar retiro de seguridad', icon=':material/price_check:',
+                type='primary', key=f'cash_opening_security_withdrawal_{opening.id}',
+                on_click=_navigate_to_cash_withdrawal, args=(excess_cash,),
+            )
 
     if is_admin and selected_date == mexico_today() and existing_close is None:
         movement_scope = f'cash_movement_{opening.id}'
         movement_version = _form_version(movement_scope)
+        focus_withdrawal = st.session_state.pop('cash_focus_withdrawal', False)
+        suggested_withdrawal = float(
+            st.session_state.pop('cash_suggested_withdrawal', 100.0))
+        movement_type_key = f'cash_movement_type_{opening.id}_{movement_version}'
+        movement_amount_key = f'cash_movement_amount_{opening.id}_{movement_version}'
+        movement_detail_key = f'cash_movement_reason_detail_{opening.id}_{movement_version}'
+        if focus_withdrawal:
+            st.session_state[movement_type_key] = 'Retiro'
+            st.session_state[movement_amount_key] = max(0.01, suggested_withdrawal)
+            st.session_state[movement_detail_key] = (
+                'Retiro de seguridad por exceder el límite recomendado')
         with st.expander('Registrar entrada o retiro autorizado',
+                         expanded=focus_withdrawal,
                          icon=':material/currency_exchange:'):
             movement_type = st.segmented_control(
-                'Tipo de movimiento', ('Retiro', 'Entrada'), default='Retiro',
-                key=f'cash_movement_type_{opening.id}_{movement_version}') or 'Retiro'
+                'Tipo de movimiento', ('Retiro', 'Entrada'), key=movement_type_key,
+                **({} if focus_withdrawal else {'default': 'Retiro'})) or 'Retiro'
             movement_columns = st.columns(2)
             movement_amount = movement_columns[0].number_input(
-                'Importe (MXN)', min_value=0.01, value=100.0, step=100.0, format='%.2f',
-                key=f'cash_movement_amount_{opening.id}_{movement_version}')
+                'Importe (MXN)', min_value=0.01, step=100.0, format='%.2f',
+                key=movement_amount_key,
+                **({} if focus_withdrawal else {'value': 100.0}))
             options = (('Retiro de seguridad', 'Pago autorizado', 'Depósito bancario', 'Otro')
                        if movement_type == 'Retiro' else
                        ('Cambio adicional', 'Reintegro', 'Entrada autorizada', 'Otro'))
@@ -2878,7 +3312,7 @@ def _render_cash_opening():
                 key=f'cash_movement_reason_category_{opening.id}_{movement_version}')
             detail = st.text_input(
                 'Detalle obligatorio', placeholder='Explica el destino u origen del efectivo',
-                key=f'cash_movement_reason_detail_{opening.id}_{movement_version}')
+                key=movement_detail_key)
             if st.button('Autorizar movimiento', type='primary',
                          icon=':material/currency_exchange:', width='stretch',
                          key=f'cash_movement_submit_{opening.id}_{movement_version}'):
@@ -3010,11 +3444,20 @@ def _render_cash_close():
         st.caption(f'Caja abierta por {opening.opened_by} · Límite recomendado: '
                    f'{_mxn(opening.cash_limit.amount)} · {opening.notes or "Sin nota"}')
         if estimated_drawer_cash > float(opening.cash_limit.amount) and existing_close is None:
+            excess_cash = estimated_drawer_cash - float(opening.cash_limit.amount)
             st.error(
                 f'El efectivo estimado supera el límite por '
-                f'{_mxn(estimated_drawer_cash - float(opening.cash_limit.amount))}. '
+                f'{_mxn(excess_cash)}. '
                 'Se recomienda que el administrador realice un retiro de seguridad.',
                 icon=':material/security:')
+            if is_admin:
+                st.button(
+                    'Ir a realizar retiro de seguridad', icon=':material/price_check:',
+                    type='primary', key=f'cash_close_security_withdrawal_{opening.id}',
+                    on_click=_navigate_to_cash_withdrawal, args=(excess_cash,),
+                )
+            else:
+                st.caption('Solicita al administrador que autorice el retiro desde Apertura de caja.')
 
         if False and is_admin and selected_date == mexico_today() and existing_close is None:
             with st.expander('Registrar entrada o retiro autorizado',
@@ -4251,6 +4694,14 @@ def _render_returns():
         st.error('Solo administración puede autorizar una devolución.',
                  icon=':material/admin_panel_settings:')
         return
+    last_voucher = st.session_state.get('last_store_credit_voucher')
+    if last_voucher:
+        with st.container(border=True):
+            st.success(
+                f"**Vale emitido {last_voucher['code']}**  \n"
+                f"Saldo disponible: **{_mxn(last_voucher['amount'])}**")
+            st.caption('Puedes escanear o capturar este código al cobrar una compra.')
+    _render_voucher_history('returns', expanded=False)
     sales = RepositoryFactory.get_sale_repository().get_all_sales()
     transactions = {}
     for sale in sales:
@@ -4296,7 +4747,24 @@ def _render_returns():
     }
     draft = st.session_state.get('return_draft')
     if not draft or draft.get('transaction_id') != selected_id:
-        st.caption('Selecciona cantidades y condición. Los cambios se aplican al guardar.')
+        product_summary = [{
+            'Producto': product_name or f'Producto #{product_id}',
+            'Vendidas': len(lines),
+            'Disponibles para devolver': len(lines),
+            'Precio unitario': float(unit_price),
+            'Subtotal': len(lines) * float(unit_price),
+        } for (product_id, product_name, unit_price), lines in grouped.items()]
+        st.subheader(f'Productos del ticket · {len(product_summary)} diferentes')
+        st.dataframe(
+            product_summary, hide_index=True, width='stretch',
+            column_config={
+                'Precio unitario': st.column_config.NumberColumn(format='$ %.2f'),
+                'Subtotal': st.column_config.NumberColumn(format='$ %.2f'),
+            },
+        )
+        st.caption(
+            'Indica cuántas unidades devuelve de cada producto. Usa 0 cuando el cliente '
+            'conserve ese producto; los cambios se aplican al guardar.')
         selection_inputs = []
         with st.form(
                 f'return_items_form_{selected_id}_{return_version}',
@@ -4306,23 +4774,21 @@ def _render_returns():
                 stable_key = f'{selected_id}_{product_id}_{row_number}_{return_version}'
                 display_name = product_name or f'Producto #{product_id}'
                 with st.container(border=True):
-                    include = st.checkbox(
-                        f'Devolver {display_name}', value=True,
-                        key=f'return_include_{stable_key}')
-                    st.caption(
-                        f'Disponibles para devolución: {len(lines)} · '
-                        f'Precio unitario: {_mxn(unit_price)}')
+                    st.markdown(f'**{row_number + 1}. {display_name}**')
                     quantity = st.number_input(
-                        f'Cantidad de {display_name}', min_value=1,
-                        max_value=len(lines), value=len(lines), step=1,
+                        f'Cantidad a devolver de {display_name}', min_value=0,
+                        max_value=len(lines), value=0, step=1,
                         key=f'return_quantity_{stable_key}')
+                    st.caption(
+                        f'Vendidas: {len(lines)} · Precio unitario: {_mxn(unit_price)} · '
+                        f'Máximo a devolver: {len(lines)}')
                     concept = st.selectbox(
                         f'Concepto y condición de {display_name}', tuple(return_concepts),
                         key=f'return_concept_{stable_key}',
                         help=('Los productos en buen estado regresan al stock; los dañados '
                               'se envían a revisión de merma.'))
                     selection_inputs.append({
-                        'include': include, 'quantity': int(quantity),
+                        'quantity': int(quantity),
                         'concept': concept, 'sale_ids': [line.id for line in lines],
                         'product_name': display_name, 'unit_price': unit_price,
                     })
@@ -4340,7 +4806,7 @@ def _render_returns():
                 'concept': item['concept'],
                 'product_name': item['product_name'],
                 'unit_price': float(item['unit_price']),
-            } for item in selection_inputs if item['include']]
+            } for item in selection_inputs if item['quantity'] > 0]
             if not plan:
                 st.error('Selecciona al menos un producto para devolver.',
                          icon=':material/checklist:')
@@ -4369,13 +4835,60 @@ def _render_returns():
     ))
     st.subheader('Autorización final')
     with st.form(f'return_transaction_form_{return_version}', enter_to_submit=False):
-        refund_options = ('Efectivo', 'Tarjeta', 'Transferencia', 'Vale')
-        suggested_refund = original_method if original_method in refund_options else 'Efectivo'
-        refund_method = st.segmented_control(
-            'Forma de reembolso', refund_options,
-            default=suggested_refund,
-            help='Por control financiero se recomienda usar el mismo método del cobro original.',
-        ) or suggested_refund
+        paid_with_voucher = original_method.strip().lower().startswith('vale')
+        resolution_options = (
+            ('Reemplazar producto', 'Entregar vale') if paid_with_voucher else
+            ('Reemplazar producto', 'Entregar vale', 'Reembolsar dinero')
+        )
+        resolution = st.segmented_control(
+            'Solución para el cliente',
+            resolution_options,
+            default='Reemplazar producto', required=True, width='stretch')
+        if paid_with_voucher:
+            st.caption(
+                'La compra utilizó un vale: cualquier saldo devuelto se entregará '
+                'como un nuevo vale y nunca como efectivo.')
+        replacement_product_id = None
+        replacement_quantity = 0
+        if resolution == 'Reemplazar producto':
+            equivalent_unit_value = return_total / max(1, len(selected_ids))
+            eligible_products = [
+                product for product in _sellable_products()
+                if (product.quantity >= len(selected_ids)
+                    and abs(float(product.price.amount) - equivalent_unit_value) < .01)
+            ]
+            product_labels = {
+                f'{product.name} · {_mxn(product.price.amount)} · '
+                f'{product.quantity} disponibles': product.id
+                for product in eligible_products
+            }
+            if product_labels:
+                replacement_label = st.selectbox(
+                    'Producto que se entregará', tuple(product_labels))
+                replacement_product_id = product_labels[replacement_label]
+                replacement_quantity = st.number_input(
+                    'Unidades a entregar', min_value=1, max_value=len(selected_ids),
+                    value=len(selected_ids), step=1)
+                st.info(
+                    'La unidad devuelta irá a inventario o cuarentena según su estado; '
+                    'la unidad de reemplazo se descontará automáticamente.')
+            else:
+                st.warning(
+                    'No hay un reemplazo disponible del mismo valor. Elige Entregar vale; '
+                    'después podrá aplicarse a cualquier producto y cobrar la diferencia.')
+            refund_method = 'Cambio'
+        elif resolution == 'Entregar vale':
+            refund_method = 'Vale'
+            st.info('Se creará e imprimirá un vale por el valor de la devolución.')
+        else:
+            refund_options = ('Efectivo', 'Tarjeta', 'Transferencia')
+            suggested_refund = original_method if original_method in refund_options else 'Efectivo'
+            refund_method = st.segmented_control(
+                'Forma de reembolso', refund_options, default=suggested_refund,
+                help='Se recomienda usar el mismo método del cobro original.') or suggested_refund
+        receipt_width = st.segmented_control(
+            'Papel del comprobante', (58, 80), default=58, required=True,
+            format_func=lambda width: f'{width} mm', width='content')
         reason = st.text_area(
             'Motivo de devolución *',
             placeholder='Ejemplo: producto defectuoso confirmado por el encargado',
@@ -4399,18 +4912,63 @@ def _render_returns():
                 icon=':material/edit_note:')
         else:
             try:
-                returned = RepositoryFactory.get_sale_repository().return_items(
-                    selected_id, return_plan, clean_reason, refund_method, _actor_name())
+                if resolution == 'Reemplazar producto' and replacement_product_id is None:
+                    raise ValueError('No hay productos disponibles para entregar como reemplazo.')
+                replacement = (next(
+                    (product for product in _sellable_products()
+                     if product.id == replacement_product_id), None)
+                    if replacement_product_id is not None else None)
+                result = RepositoryFactory.get_sale_repository().return_items(
+                    selected_id, return_plan, clean_reason, refund_method, _actor_name(),
+                    issue_voucher=refund_method == 'Vale',
+                    replacement_product_id=replacement_product_id,
+                    replacement_quantity=replacement_quantity)
+                if refund_method == 'Vale':
+                    returned, voucher = result
+                else:
+                    returned, voucher = result, None
                 amount = sum(float(sale.price.amount) for sale in returned)
                 RepositoryFactory.get_operations_repository().audit(
                     'venta_devuelta', _actor_name(), 'sale', selected_id,
                     f'{len(returned)} artículos · {_mxn(amount)} · {refund_method} · '
                     f'{restock_count} a stock · {review_count} a revisión · {clean_reason}')
+                print_status = ''
+                if voucher is not None:
+                    st.session_state.last_store_credit_voucher = {
+                        'code': voucher.code, 'amount': amount,
+                        'transaction_id': selected_id, 'reason': clean_reason,
+                    }
+                    try:
+                        printer = _print_thermal_ticket(
+                            _business_export_data(), voucher.code, voucher.issued_at,
+                            ({'name': 'Saldo a favor por devolución',
+                              'quantity': 1, 'unit_price': amount},),
+                            'VALE DE SALDO A FAVOR',
+                            f'Código: {voucher.code} | Venta original: {selected_label}',
+                            voucher.customer, receipt_width,
+                            'VALE DE SALDO A FAVOR', voucher.code)
+                        print_status = f' Vale impreso en {printer}.'
+                    except Exception as print_error:
+                        print_status = f' Vale creado; impresión pendiente: {print_error}'
+                elif resolution == 'Reemplazar producto':
+                    try:
+                        printer = _print_thermal_ticket(
+                            _business_export_data(), _sale_folio(min(selected_ids)), mexico_now(),
+                            ({'name': f'Reemplazo: {replacement.name}',
+                              'quantity': replacement_quantity,
+                              'unit_price': 0.0},), 'CAMBIO SIN REEMBOLSO',
+                            f'Venta original: {selected_label} | Motivo: {clean_reason}',
+                            selected_sales[0].customer, receipt_width,
+                            'COMPROBANTE DE CAMBIO')
+                        print_status = f' Comprobante impreso en {printer}.'
+                    except Exception as print_error:
+                        print_status = f' Cambio guardado; impresión pendiente: {print_error}'
                 _queue_activity_notice(
                     'Devolución registrada',
                     f'Reembolso de {_mxn(amount)} mediante {refund_method}. '
                     f'{restock_count} unidad(es) regresaron al stock y '
-                    f'{review_count} quedaron pendientes de revisión en Mermas.',
+                    f'{review_count} quedaron pendientes de revisión en Mermas.'
+                    f'{print_status}',
                     tone='warning', icon=':material/assignment_return:')
                 st.session_state.pop('return_draft', None)
                 _reset_form('return_transaction')
@@ -4424,6 +4982,13 @@ def _render_returns():
 def _navigate_to_page(target):
     """Callback de navegación; se ejecuta antes de crear el widget del menú."""
     st.session_state['page'] = target
+
+
+def _navigate_to_cash_withdrawal(suggested_amount):
+    """Abre directamente el formulario administrativo de retiro de seguridad."""
+    st.session_state['cash_focus_withdrawal'] = True
+    st.session_state['cash_suggested_withdrawal'] = round(float(suggested_amount), 2)
+    st.session_state['page'] = 'Apertura de caja'
 
 
 def _sidebar_nav_button(page_name, label, icon, key):
@@ -4497,73 +5062,156 @@ def _render_sidebar_navigation(is_admin):
 
 
 def _render_help_assistant():
-    """Ayuda operativa local: no consulta APIs ni modifica información."""
-    _hero('Asistente ECCOS',
-          'Resuelve dudas del punto de venta con instrucciones claras y seguras.',
-          'AYUDA DEL SISTEMA · SIN COSTO')
+    """Ayuda operativa local, conversacional y filtrada por permisos."""
     role = 'admin' if _is_administrator() else 'seller'
     topics = topics_for_role(role)
     state_key = f'assistant_messages_{role}'
     st.session_state.setdefault(state_key, [])
+    has_online_support = online_support_available()
+    online_enabled = False
+    business = _business_export_data()
+    business_name = escape(business.get('business_name') or 'Grupo ECCOS')
+    brand_color = business.get('brand_color') or '#17477D'
+    logo_html = '<span class="eccos-assistant-mark">◇</span>'
+    if business.get('logo_data'):
+        logo_mime = escape(business.get('logo_mime') or 'image/png')
+        logo_data = escape(business['logo_data'])
+        logo_html = (
+            f'<img class="eccos-assistant-logo" '
+            f'src="data:{logo_mime};base64,{logo_data}" alt="Logotipo">')
 
-    with st.container(border=True):
-        st.markdown('#### ¿En qué necesitas ayuda?')
-        category = st.selectbox(
-            'Tema', ('Todos', *sorted({topic.category for topic in topics})),
-            key=f'assistant_category_{role}')
-        visible_topics = topics if category == 'Todos' else tuple(
-            topic for topic in topics if topic.category == category)
-        selected_question = st.selectbox(
-            'Preguntas frecuentes',
-            ('Selecciona una pregunta…', *(topic.question for topic in visible_topics)),
-            key=f'assistant_question_{role}')
-        if st.button('Ver solución', type='primary', icon=':material/help:',
-                     disabled=selected_question.startswith('Selecciona')):
-            selected_topic = next(
-                topic for topic in visible_topics if topic.question == selected_question)
+    st.markdown(f'''
+    <style>
+      .st-key-assistant_workspace {{ max-width:1040px; margin:0 auto; }}
+      .eccos-assistant-hero {{ display:flex; align-items:center; gap:18px; padding:24px 26px;
+        border-radius:20px; color:#fff; background:linear-gradient(135deg,#07172A 0%,{brand_color} 100%);
+        box-shadow:0 14px 34px rgba(7,23,42,.14); margin-bottom:18px; }}
+      .eccos-assistant-mark,.eccos-assistant-logo {{ width:58px; height:58px; flex:0 0 58px;
+        border-radius:16px; display:grid; place-items:center; object-fit:contain; padding:8px;
+        background:rgba(255,255,255,.13); border:1px solid rgba(255,255,255,.22);
+        font-size:30px; box-sizing:border-box; }}
+      .eccos-assistant-hero small {{ color:#9FC5EB; font-weight:800; letter-spacing:.12em; }}
+      .eccos-assistant-hero h1 {{ color:#fff !important; margin:3px 0 2px !important;
+        font-size:1.75rem !important; }}
+      .eccos-assistant-hero p {{ margin:0; color:#E6EEF7; line-height:1.5; }}
+      .st-key-assistant_controls,.st-key-assistant_chat {{ background:#fff;
+        border:1px solid #D7E0EA; border-radius:18px; padding:18px 20px;
+        box-shadow:0 8px 24px rgba(7,23,42,.055); }}
+      .st-key-assistant_chat {{ margin-top:14px; }}
+      .st-key-assistant_chat [data-testid="stChatMessage"] {{ border-radius:16px; padding:10px 12px; }}
+      @media (max-width:640px) {{
+        .eccos-assistant-hero {{ align-items:flex-start; padding:20px; border-radius:16px; }}
+        .eccos-assistant-mark,.eccos-assistant-logo {{ width:46px; height:46px; flex-basis:46px; }}
+        .eccos-assistant-hero h1 {{ font-size:1.38rem !important; }}
+        .st-key-assistant_controls,.st-key-assistant_chat {{ padding:12px; border-radius:14px; }}
+      }}
+    </style>
+    ''', unsafe_allow_html=True)
+
+    with st.container(key='assistant_workspace'):
+        st.markdown(f'''
+        <section class="eccos-assistant-hero">{logo_html}<div>
+          <small>{business_name.upper()} · SOPORTE DEL SISTEMA</small>
+          <h1>¿Cómo podemos ayudarte?</h1>
+          <p>Consulta procedimientos de ventas, impresión, vales, devoluciones y caja.
+          Las respuestas respetan los permisos de tu perfil.</p>
+        </div></section>
+        ''', unsafe_allow_html=True)
+
+        with st.container(key='assistant_controls'):
+            with st.container(horizontal=True, vertical_alignment='bottom'):
+                category = st.selectbox(
+                    'Explorar por tema', ('Todos', *sorted({topic.category for topic in topics})),
+                    key=f'assistant_category_{role}', width='stretch')
+                if st.session_state[state_key]:
+                    if st.button('Nueva consulta', icon=':material/edit_square:', width='content',
+                                 key=f'assistant_clear_top_{role}'):
+                        st.session_state[state_key] = []
+                        st.rerun()
+            visible_topics = topics if category == 'Todos' else tuple(
+                topic for topic in topics if topic.category == category)
+            selected_question = st.selectbox(
+                'Preguntas frecuentes',
+                ('Selecciona una pregunta…', *(topic.question for topic in visible_topics)),
+                key=f'assistant_question_{role}', width='stretch')
+            if st.button('Consultar respuesta', type='primary', icon=':material/arrow_forward:',
+                         disabled=selected_question.startswith('Selecciona'), width='stretch'):
+                selected_topic = next(
+                    topic for topic in visible_topics if topic.question == selected_question)
+                st.session_state[state_key].extend((
+                    {'role': 'user', 'content': selected_topic.question},
+                    {'role': 'assistant', 'content': selected_topic.answer,
+                     'page': selected_topic.page},
+                ))
+                st.rerun()
+            if has_online_support:
+                online_enabled = st.toggle(
+                    'Consultar soporte en línea cuando la ayuda local no encuentre respuesta',
+                    value=True, key=f'assistant_online_{role}',
+                    help='Sólo transmite la pregunta sanitizada; nunca envía ventas ni bases de datos.')
+                st.caption(
+                    ':green-badge[En línea disponible] Primero se consulta la guía local. '
+                    'Los folios, vales, importes, teléfonos y correos se ocultan antes de enviar.')
+            else:
+                st.caption(
+                    ':gray-badge[Modo local] Para habilitar consultas generales por internet, '
+                    'configura el secreto `GROQ_API_KEY`.')
+
+        with st.container(key='assistant_chat'):
+            if not st.session_state[state_key]:
+                with st.chat_message('assistant', avatar=':material/support_agent:'):
+                    st.markdown(
+                        '**Hola, soy el Asistente ECCOS.** Elige una pregunta frecuente '
+                        'o escribe tu duda abajo. La guía local siempre tiene prioridad y '
+                        'no comparto información operativa de tu negocio.')
+
+            for index, message in enumerate(st.session_state[state_key]):
+                avatar = (':material/support_agent:' if message['role'] == 'assistant'
+                          else ':material/person:')
+                with st.chat_message(message['role'], avatar=avatar):
+                    if message.get('source') == 'online':
+                        st.markdown(':blue-badge[Soporte en línea · respuesta externa]')
+                    elif message['role'] == 'assistant':
+                        st.markdown(':green-badge[Guía oficial de Puntos ECCOS]')
+                    st.markdown(message['content'])
+                    target = message.get('page')
+                    available_pages = ADMIN_PAGES if _is_administrator() else SELLER_PAGES
+                    if _is_administrator() and target == 'Nueva venta':
+                        target = 'Ventas'
+                    if target in available_pages:
+                        st.button(f'Ir a {target}', key=f'assistant_go_{role}_{index}',
+                                  icon=':material/arrow_forward:',
+                                  on_click=_navigate_to_page, args=(target,))
+
+        if prompt := st.chat_input('Escribe tu duda sobre Puntos ECCOS…',
+                                   key=f'assistant_input_{role}'):
+            topic = find_answer(prompt, role)
+            if topic is None:
+                source = 'local'
+                target = None
+                if has_online_support and online_enabled:
+                    try:
+                        with st.spinner('Consultando soporte técnico general…'):
+                            answer = ask_online_support(prompt, role)
+                        source = 'online'
+                    except OnlineSupportError as error:
+                        answer = (
+                            f'**No pude consultar internet:** {error}  \n'
+                            'La ayuda local continúa funcionando. Prueba indicando la operación '
+                            'y el mensaje exacto, sin incluir datos de clientes ni folios.')
+                else:
+                    answer = (
+                        'No encontré una solución suficientemente segura en la guía local. '
+                        'Prueba indicando la operación y el mensaje que ves, o selecciona una '
+                        'pregunta frecuente. No inventaré pasos que puedan afectar ventas o caja.')
+            else:
+                answer, target = topic.answer, topic.page
+                source = 'local'
             st.session_state[state_key].extend((
-                {'role': 'user', 'content': selected_topic.question},
-                {'role': 'assistant', 'content': selected_topic.answer,
-                 'page': selected_topic.page},
+                {'role': 'user', 'content': prompt},
+                {'role': 'assistant', 'content': answer, 'page': target, 'source': source},
             ))
             st.rerun()
-
-    if not st.session_state[state_key]:
-        st.info('Selecciona una pregunta o escribe tu duda. El asistente funciona sin internet y no comparte los datos de tu negocio.')
-
-    for index, message in enumerate(st.session_state[state_key]):
-        avatar = ':material/support_agent:' if message['role'] == 'assistant' else ':material/person:'
-        with st.chat_message(message['role'], avatar=avatar):
-            st.markdown(message['content'])
-            target = message.get('page')
-            available_pages = ADMIN_PAGES if _is_administrator() else SELLER_PAGES
-            if _is_administrator() and target == 'Nueva venta':
-                target = 'Ventas'
-            if target in available_pages:
-                st.button(f'Ir a {target}', key=f'assistant_go_{role}_{index}',
-                          icon=':material/arrow_forward:',
-                          on_click=_navigate_to_page, args=(target,))
-
-    if prompt := st.chat_input('Escribe una duda sobre Puntos ECCOS…',
-                               key=f'assistant_input_{role}'):
-        topic = find_answer(prompt, role)
-        if topic is None:
-            answer = ('No encontré una solución suficientemente segura para esa pregunta. '
-                      'Prueba con otras palabras o selecciona una pregunta frecuente. '
-                      'Este asistente evita inventar procedimientos que podrían afectar tu operación.')
-            target = None
-        else:
-            answer, target = topic.answer, topic.page
-        st.session_state[state_key].extend((
-            {'role': 'user', 'content': prompt},
-            {'role': 'assistant', 'content': answer, 'page': target},
-        ))
-        st.rerun()
-
-    if st.session_state[state_key] and st.button(
-            'Limpiar conversación', icon=':material/delete_sweep:'):
-        st.session_state[state_key] = []
-        st.rerun()
 
 
 ADMIN_PAGES = {

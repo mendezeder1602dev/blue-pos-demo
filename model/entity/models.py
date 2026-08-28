@@ -222,6 +222,35 @@ class ReturnLossRequest(Base):
     resolution_notes = Column(String(length=300), nullable=True, default='')
 
 
+class StoreCreditVoucher(Base):
+    """Saldo a favor emitido por una devolución; el código funciona como portador."""
+    __tablename__ = 'store_credit_vouchers'
+    id = Column(Integer, primary_key=True)
+    code = Column(String(length=32), nullable=False, unique=True, index=True)
+    original_transaction_id = Column(String(length=36), nullable=False, index=True)
+    initial_amount = Column(MoneyColumn(), nullable=False)
+    balance = Column(MoneyColumn(), nullable=False)
+    status = Column(String(length=20), nullable=False, default='Activo', index=True)
+    customer = Column(String(length=120), nullable=True, default='Público general')
+    reason = Column(String(length=300), nullable=False)
+    issued_by = Column(String(length=120), nullable=False)
+    issued_at = Column(DateTime, nullable=False, default=mexico_now, index=True)
+
+
+class StoreCreditMovement(Base):
+    """Libro inmutable de emisiones, usos y restituciones de un vale."""
+    __tablename__ = 'store_credit_movements'
+    id = Column(Integer, primary_key=True)
+    voucher_id = Column(Integer, ForeignKey('store_credit_vouchers.id', ondelete='RESTRICT'),
+                        nullable=False, index=True)
+    movement_type = Column(String(length=20), nullable=False)
+    amount = Column(MoneyColumn(), nullable=False)
+    sale_transaction_id = Column(String(length=36), nullable=True, index=True)
+    performed_by = Column(String(length=120), nullable=False)
+    created_at = Column(DateTime, nullable=False, default=mexico_now, index=True)
+    voucher = relationship('StoreCreditVoucher', backref='movements')
+
+
 class AuditLog(Base):
     """Bitácora operativa inmutable para acciones sensibles."""
     __tablename__ = 'audit_logs'

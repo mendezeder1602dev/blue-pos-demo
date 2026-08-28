@@ -2,6 +2,7 @@ from sqlalchemy import FLOAT, cast, func, select
 
 from model.entity.models import CashClose
 from model.util.monetary_types import CUPMoney
+from model.authorization import require_role
 
 
 class CashCloseRepository:
@@ -10,6 +11,7 @@ class CashCloseRepository:
         self.__session = session
 
     def insert(self, cash_close: CashClose) -> CashClose:
+        require_role('superuser')
         if cash_close.opening_id is not None and self.get_for_opening(cash_close.opening_id):
             raise ValueError('Este turno ya tiene un cierre de caja.')
         if not cash_close.cashier.strip():

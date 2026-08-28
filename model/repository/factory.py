@@ -14,6 +14,7 @@ from model.repository.cash_close import CashCloseRepository
 from model.repository.cash_control import CashControlRepository
 from model.repository.operations import OperationsRepository
 from model.repository.catalog import CatalogRepository
+from model.repository.store_credit import StoreCreditRepository
 
 
 __BLUE_POS_FOLDER_PATH = Path(os.path.join(str(Path.home()), '.blue-pos/'))
@@ -58,6 +59,7 @@ class RepositoryFactory:
     __cash_control_repository = None
     __operations_repository = None
     __catalog_repository = None
+    __store_credit_repository = None
 
     @staticmethod
     def activate_workspace(url: str):
@@ -88,6 +90,7 @@ class RepositoryFactory:
         RepositoryFactory.__cash_control_repository = None
         RepositoryFactory.__operations_repository = None
         RepositoryFactory.__catalog_repository = None
+        RepositoryFactory.__store_credit_repository = None
 
     @staticmethod
     def workspace_url(workspace_key: str) -> str:
@@ -126,7 +129,8 @@ class RepositoryFactory:
         RepositoryFactory.__create_session_if_necessary(url)
 
         if RepositoryFactory.__sale_repository is None:
-            RepositoryFactory.__sale_repository = SaleRepository(RepositoryFactory.__session)
+            RepositoryFactory.__sale_repository = SaleRepository(
+                RepositoryFactory.__session, enforce_open_cash=url is None)
 
         return RepositoryFactory.__sale_repository
 
@@ -202,6 +206,14 @@ class RepositoryFactory:
         return RepositoryFactory.__catalog_repository
 
     @staticmethod
+    def get_store_credit_repository(url: str = None):
+        RepositoryFactory.__create_session_if_necessary(url)
+        if RepositoryFactory.__store_credit_repository is None:
+            RepositoryFactory.__store_credit_repository = StoreCreditRepository(
+                RepositoryFactory.__session)
+        return RepositoryFactory.__store_credit_repository
+
+    @staticmethod
     def active_database_url():
         return RepositoryFactory.__url or DB_URL
 
@@ -250,6 +262,7 @@ class RepositoryFactory:
         RepositoryFactory.__cash_control_repository = None
         RepositoryFactory.__operations_repository = None
         RepositoryFactory.__catalog_repository = None
+        RepositoryFactory.__store_credit_repository = None
         RepositoryFactory.__auth_session = None
         RepositoryFactory.__auth_engine = None
         RepositoryFactory.__auth_user_repository = None

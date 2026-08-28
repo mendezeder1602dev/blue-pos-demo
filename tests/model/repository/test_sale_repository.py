@@ -1,7 +1,8 @@
 import unittest
 from datetime import date, timedelta
 from sqlalchemy import delete, select
-from model.entity.models import ReturnLossRequest
+from model.entity.models import (ReturnLossRequest, StoreCreditMovement,
+                                 StoreCreditVoucher)
 from model.repository.exc.product import NonExistentProductException, NoPositivePriceException, NegativeCostException
 from model.repository.exc.sale import NoEnoughProductQuantityException, NonExistentSaleException, \
     ChangeProductIdInSaleException
@@ -20,10 +21,15 @@ class TestSaleRepository(unittest.TestCase):
 
     def setUp(self):
         self.sale_repository = RepositoryFactory.get_sale_repository(TEST_DB_URL)
+        bind = self.sale_repository._SaleRepository__session.bind
+        StoreCreditVoucher.__table__.create(bind, checkfirst=True)
+        StoreCreditMovement.__table__.create(bind, checkfirst=True)
         self.TODAY_DATE = date.today()
 
     def tearDown(self):
         session = self.sale_repository._SaleRepository__session
+        session.execute(delete(StoreCreditMovement))
+        session.execute(delete(StoreCreditVoucher))
         session.execute(delete(ReturnLossRequest))
         session.commit()
         RepositoryFactory.close_session()
@@ -103,6 +109,80 @@ class TestSaleRepository(unittest.TestCase):
         self.assertEqual(request.status, 'Pendiente')
         self.assertEqual(request.quantity, 1)
         self.assertEqual(request.concept, 'Producto dañado o no funciona')
+
+    def test_return_can_issue_a_real_store_credit_voucher(self):
+        product = ProductGenerator.generate_one_product()
+        product.quantity = 2
+        product = insert_product_and_return_it(product)
+        sale = SaleGenerator.generate_one_sale_from_product(product)
+        sale.transaction_id = 'ticket-store-credit'
+        self.sale_repository.insert_sales(sale, 1)
+        sold_unit = get_all_sales_from_database()[0]
+
+        returned, voucher = self.sale_repository.return_items(
+            sale.transaction_id,
+            [{'sale_ids': [sold_unit.id],
+              'disposition': 'Reintegrar a inventario'}],
+            'Cliente solicita saldo a favor', 'Vale', issue_voucher=True)
+
+        self.assertEqual(len(returned), 1)
+        self.assertTrue(voucher.code.startswith('VALE-'))
+        self.assertEqual(float(voucher.balance.amount), float(sold_unit.price.amount))
+        self.assertEqual(voucher.status, 'Activo')
+
+    def test_partial_voucher_payment_expires_old_code_and_issues_new_code(self):
+        product = ProductGenerator.generate_one_product()
+        product.quantity = 2
+        product = insert_product_and_return_it(product)
+        sale = SaleGenerator.generate_one_sale_from_product(product)
+        purchase_total = float(sale.price.amount)
+        original_value = purchase_total + 125.50
+        session = self.sale_repository._SaleRepository__session
+        original = StoreCreditVoucher(
+            code='VALE-OLD1-OLD2-OLD3-OLD4',
+            original_transaction_id='return-origin',
+            initial_amount=CUPMoney(f'{original_value:.2f}'),
+            balance=CUPMoney(f'{original_value:.2f}'), status='Activo',
+            customer='Cliente prueba', reason='Devolución', issued_by='Administrador')
+        session.add(original)
+        session.commit()
+
+        inserted = self.sale_repository.insert_sales(
+            sale, 1, original.code, purchase_total, 'Vendedor')
+
+        session.refresh(original)
+        replacement = session.scalar(select(StoreCreditVoucher).where(
+            StoreCreditVoucher.original_transaction_id == inserted[0].transaction_id,
+            StoreCreditVoucher.id != original.id))
+        self.assertEqual(original.status, 'Agotado')
+        self.assertEqual(float(original.balance.amount), 0.0)
+        self.assertIsNotNone(replacement)
+        self.assertNotEqual(replacement.code, original.code)
+        self.assertEqual(float(replacement.balance.amount), 125.50)
+        self.assertEqual(replacement.status, 'Activo')
+
+    def test_damaged_item_replacement_moves_only_the_sellable_unit_out(self):
+        products = ProductGenerator.generate_products_by_quantity(2)
+        products[0].quantity = 1
+        products[1].quantity = 4
+        sold_product, replacement = insert_products_in_database_and_return_them(products)
+        sale = SaleGenerator.generate_one_sale_from_product(sold_product)
+        sale.transaction_id = 'ticket-replacement'
+        self.sale_repository.insert_sales(sale, 1)
+        sold_unit = get_all_sales_from_database()[0]
+
+        returned = self.sale_repository.return_items(
+            sale.transaction_id,
+            [{'sale_ids': [sold_unit.id],
+              'disposition': 'Enviar a revisión de merma',
+              'concept': 'Producto dañado o no funciona'}],
+            'Defecto confirmado y reemplazo autorizado', 'Cambio',
+            replacement_product_id=replacement.id, replacement_quantity=1)
+
+        refreshed = {product.id: product for product in get_all_products_in_database()}
+        self.assertEqual(len(returned), 1)
+        self.assertEqual(refreshed[sold_product.id].quantity, 0)
+        self.assertEqual(refreshed[replacement.id].quantity, 3)
 
     def test_sale_insertion_with_no_enough_products_raises_exception(self):
         product = ProductGenerator.generate_one_product()

@@ -56,6 +56,9 @@ class CashControlRepository:
         if (movement.movement_type == 'Retiro' and available_cash is not None
                 and float(movement.amount.amount) > float(available_cash)):
             raise ValueError('El retiro no puede superar el efectivo estimado en caja.')
+        if movement.movement_type == 'Retiro' and available_cash is None:
+            raise ValueError(
+                'No se pudo comprobar el efectivo disponible para autorizar el retiro.')
         self.__session.add(movement)
         self.__session.commit()
         return movement

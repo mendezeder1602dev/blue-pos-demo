@@ -88,12 +88,58 @@ def generate_thermal_ticket_bytes(
                   business.get('return_policy')):
         if value:
             footer_lines.extend(_wrap_ticket_text(value, 'Helvetica', small_size, available))
-    item_name_lines = sum(
-        len(_wrap_ticket_text(item['name'], 'Helvetica-Bold', body_size, available))
-        for item in normalized_items)
-    estimated_lines = (16 + len(header_lines) + len(detail_lines) + len(footer_lines)
-                       + item_name_lines + len(normalized_items) * 2)
-    page_height = max(90 * mm, estimated_lines * leading + 18 * mm)
+    slogan_lines = (_wrap_ticket_text(
+        business['slogan'], 'Helvetica', small_size, available)
+        if business.get('slogan') else [])
+    customer_lines = (_wrap_ticket_text(
+        f'Cliente: {customer}', 'Helvetica', small_size, available)
+        if customer else [])
+    item_lines = [
+        _wrap_ticket_text(item['name'], 'Helvetica-Bold', body_size, available)
+        for item in normalized_items
+    ]
+
+    logo_image = None
+    logo_height = 0
+    logo_data = business.get('logo_data')
+    if logo_data:
+        try:
+            logo_image = ImageReader(BytesIO(base64.b64decode(logo_data)))
+            logo_height = 12 * mm
+        except (ValueError, TypeError, OSError):
+            pass
+
+    # Calcula la altura usando exactamente los mismos avances verticales que
+    # utiliza el dibujo. De esta manera una venta corta produce un papel corto
+    # y cada producto o renglón adicional hace crecer el rollo lo necesario.
+    text_step = lambda size: size + 2
+    content_height = (
+        (logo_height + 3 if logo_image else 0)
+        + text_step(11 if paper_width_mm == 58 else 13)
+        + len(slogan_lines) * text_step(small_size)
+        + len(header_lines) * text_step(small_size)
+        + 8  # separador del encabezado
+        + text_step(body_size + 1)
+        + text_step(body_size)
+        + text_step(small_size)
+        + len(customer_lines) * text_step(small_size)
+        + 8  # separador antes de productos
+        + sum(
+            len(lines) * text_step(body_size) + (small_size + 1) + leading
+            for lines in item_lines
+        )
+        + 8  # separador antes del total
+        + body_size + 7
+        + 8  # separador antes del pago
+        + text_step(body_size)
+        + len(detail_lines) * text_step(small_size)
+        + 8  # separador antes del pie
+        + len(footer_lines) * text_step(small_size)
+        + 2 * text_step(small_size)
+        + 5 * mm  # avance para cortar sin tocar la última línea
+    )
+    bottom_margin = 2 * mm
+    page_height = margin + content_height + bottom_margin
 
     output = BytesIO()
     pdf = canvas.Canvas(output, pagesize=(page_width, page_height), pageCompression=1)
@@ -124,25 +170,17 @@ def generate_thermal_ticket_bytes(
         pdf.line(margin, y, page_width - margin, y)
         y -= 6
 
-    logo_data = business.get('logo_data')
-    if logo_data:
-        try:
-            image = ImageReader(BytesIO(base64.b64decode(logo_data)))
-            logo_width = min(28 * mm, available * .55)
-            logo_height = 12 * mm
-            pdf.drawImage(image, (page_width - logo_width) / 2, y - logo_height,
-                          width=logo_width, height=logo_height, preserveAspectRatio=True,
-                          anchor='c', mask='auto')
-            y -= logo_height + 3
-        except (ValueError, TypeError, OSError):
-            pass
+    if logo_image:
+        logo_width = min(28 * mm, available * .55)
+        pdf.drawImage(logo_image, (page_width - logo_width) / 2, y - logo_height,
+                      width=logo_width, height=logo_height, preserveAspectRatio=True,
+                      anchor='c', mask='auto')
+        y -= logo_height + 3
 
     centered(business.get('business_name') or 'Mi negocio', 'Helvetica-Bold',
              11 if paper_width_mm == 58 else 13)
-    if business.get('slogan'):
-        for line in _wrap_ticket_text(
-                business['slogan'], 'Helvetica', small_size, available):
-            centered(line, size=small_size)
+    for line in slogan_lines:
+        centered(line, size=small_size)
     for line in header_lines:
         centered(line, size=small_size)
     divider()
@@ -151,14 +189,12 @@ def generate_thermal_ticket_bytes(
     timestamp = (created_at.strftime('%d/%m/%Y %H:%M')
                  if hasattr(created_at, 'strftime') else str(created_at))
     centered(timestamp, size=small_size)
-    if customer:
-        for line in _wrap_ticket_text(
-                f'Cliente: {customer}', 'Helvetica', small_size, available):
-            centered(line, size=small_size)
+    for line in customer_lines:
+        centered(line, size=small_size)
     divider()
 
-    for item in normalized_items:
-        for line in _wrap_ticket_text(item['name'], 'Helvetica-Bold', body_size, available):
+    for item, lines in zip(normalized_items, item_lines):
+        for line in lines:
             left(line, 'Helvetica-Bold', body_size)
         left(f"{item['quantity']} x ${item['unit_price']:,.2f} MXN", size=small_size,
              step=small_size + 1)

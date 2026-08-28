@@ -1,12 +1,15 @@
 """Persistencia transaccional de tickets, devoluciones y existencias vendidas."""
 
 import json
+import secrets
 from datetime import date, datetime
 from uuid import uuid4
 
 from sqlalchemy import update, select, delete, cast, Numeric, asc, desc, Float, func
 
-from model.entity.models import Product, ReturnLossRequest, Sale, StockMovement
+from model.entity.models import (CashClose, CashMovement, CashOpening, Product,
+                                 ReturnLossRequest, Sale, StockMovement,
+                                 StoreCreditMovement, StoreCreditVoucher)
 from sqlalchemy.orm import Session, aliased
 
 from model.repository.exc.product import NonExistentProductException, NoPositivePriceException, NegativeCostException
@@ -15,7 +18,7 @@ from model.repository.exc.sale import NoEnoughProductQuantityException, NonExist
 from model.repository.observer import RepositoryObserver
 from model.util.monetary_types import CUPMoney
 from model.authorization import require_role
-from model.timezone import mexico_now
+from model.timezone import mexico_now, mexico_today
 
 
 class SaleFilter:
@@ -86,11 +89,14 @@ class SaleFilter:
 
 class SaleRepository(RepositoryObserver):
 
-    def __init__(self, session: Session):
+    def __init__(self, session: Session, enforce_open_cash: bool = False):
         super().__init__()
         self.__session = session
+        self.__enforce_open_cash = bool(enforce_open_cash)
 
-    def insert_sales(self, sale: Sale, quantity: int) -> list:
+    def insert_sales(self, sale: Sale, quantity: int, voucher_code: str = '',
+                     voucher_amount: float = 0, actor: str = 'Vendedor') -> list:
+        self.__require_open_cash()
         self.__check_quantity_is_positive(quantity)
         self.__check_price_is_positive(sale)
         self.__check_cost_is_not_negative(sale)
@@ -99,12 +105,34 @@ class SaleRepository(RepositoryObserver):
 
         sales = self.__execute_insertion_and_return_sales(sale, quantity)
         self.__execute_product_quantity_update(sale, quantity)
+        if voucher_code:
+            voucher = self.__session.scalar(select(StoreCreditVoucher).where(
+                StoreCreditVoucher.code == voucher_code.strip().upper()))
+            applied = round(float(voucher_amount or 0), 2)
+            if (voucher is None or voucher.status != 'Activo' or applied <= 0
+                    or float(voucher.balance.amount) < applied):
+                self.__session.rollback()
+                raise ValueError('El vale no existe o su saldo ya no es suficiente.')
+            transaction_id = sale.transaction_id or uuid4().hex
+            for inserted in sales:
+                inserted.transaction_id = transaction_id
+            remaining = float(voucher.balance.amount) - applied
+            voucher.balance = CUPMoney('0.00')
+            voucher.status = 'Agotado'
+            self.__session.add(StoreCreditMovement(
+                voucher_id=voucher.id, movement_type='Aplicación',
+                amount=CUPMoney(f'{-applied:.2f}'), sale_transaction_id=transaction_id,
+                performed_by=actor))
+            if remaining > 0:
+                self.__rollover_voucher(voucher, remaining, transaction_id, actor)
         self.__session.commit()
         self._notify_on_data_changed_listeners()
         return sales
 
-    def insert_transaction(self, entries: list) -> list:
+    def insert_transaction(self, entries: list, voucher_code: str = '',
+                           voucher_amount: float = 0, actor: str = 'Vendedor') -> list:
         """Registra todos los renglones de un cobro como una operación atómica."""
+        self.__require_open_cash()
         if not entries:
             raise ValueError('A transaction must contain at least one product.')
         transaction_id = uuid4().hex
@@ -121,6 +149,14 @@ class SaleRepository(RepositoryObserver):
                 raise NoEnoughProductQuantityException(product.quantity)
         inserted_sales = []
         try:
+            voucher = None
+            applied = round(float(voucher_amount or 0), 2)
+            if voucher_code:
+                voucher = self.__session.scalar(select(StoreCreditVoucher).where(
+                    StoreCreditVoucher.code == voucher_code.strip().upper()))
+                if (voucher is None or voucher.status != 'Activo'
+                        or applied <= 0 or float(voucher.balance.amount) < applied):
+                    raise ValueError('El vale no existe o su saldo ya no es suficiente.')
             for sale, quantity in entries:
                 sale.transaction_id = transaction_id
                 inserted_sales.extend(self.__execute_insertion_and_return_sales(sale, quantity))
@@ -132,12 +168,60 @@ class SaleRepository(RepositoryObserver):
                 )
                 if result.rowcount != 1:
                     raise NoEnoughProductQuantityException(0)
+            if voucher is not None:
+                remaining = float(voucher.balance.amount) - applied
+                voucher.balance = CUPMoney('0.00')
+                voucher.status = 'Agotado'
+                self.__session.add(StoreCreditMovement(
+                    voucher_id=voucher.id, movement_type='Aplicación',
+                    amount=CUPMoney(f'{-applied:.2f}'),
+                    sale_transaction_id=transaction_id, performed_by=actor,
+                ))
+                if remaining > 0:
+                    self.__rollover_voucher(voucher, remaining, transaction_id, actor)
             self.__session.commit()
         except Exception:
             self.__session.rollback()
             raise
         self._notify_on_data_changed_listeners()
         return inserted_sales
+
+    def __require_open_cash(self):
+        if not self.__enforce_open_cash:
+            return
+        active = self.__session.scalar(
+            select(CashOpening.id).where(
+                CashOpening.date == mexico_today(),
+                ~select(CashClose.id).where(
+                    CashClose.opening_id == CashOpening.id).exists(),
+            ).limit(1)
+        )
+        if active is None:
+            raise ValueError('No hay un turno de caja abierto para registrar la venta.')
+
+    def __rollover_voucher(self, source, remaining, transaction_id, actor):
+        """Agota el código anterior y transfiere su remanente a uno nuevo."""
+        self.__session.add(StoreCreditMovement(
+            voucher_id=source.id, movement_type='Saldo transferido',
+            amount=CUPMoney(f'{-remaining:.2f}'), sale_transaction_id=transaction_id,
+            performed_by=actor,
+        ))
+        token = secrets.token_hex(8).upper()
+        replacement = StoreCreditVoucher(
+            code=f'VALE-{token[:4]}-{token[4:8]}-{token[8:12]}-{token[12:]}',
+            original_transaction_id=transaction_id,
+            initial_amount=CUPMoney(f'{remaining:.2f}'),
+            balance=CUPMoney(f'{remaining:.2f}'), status='Activo',
+            customer=source.customer or 'Público general',
+            reason=f'Remanente del vale {source.code}', issued_by=actor,
+        )
+        self.__session.add(replacement)
+        self.__session.flush()
+        self.__session.add(StoreCreditMovement(
+            voucher_id=replacement.id, movement_type='Emisión',
+            amount=CUPMoney(f'{remaining:.2f}'), sale_transaction_id=transaction_id,
+            performed_by=actor,
+        ))
     def __check_quantity_is_positive(self, quantity: int):
         if quantity <= 0:
             raise ValueError('The quantity of sales must be positive.')
@@ -240,18 +324,46 @@ class SaleRepository(RepositoryObserver):
             self.__session.execute(update(Product).where(Product.id == product_id).values(
                 quantity=Product.quantity + quantity
             ))
+        applied_movements = list(self.__session.scalars(
+            select(StoreCreditMovement).where(
+                StoreCreditMovement.sale_transaction_id == transaction_id,
+                StoreCreditMovement.movement_type == 'Aplicación',
+            )
+        ).all())
+        restored_credit = sum(abs(float(movement.amount.amount))
+                              for movement in applied_movements)
+        if restored_credit > 0:
+            source_voucher = applied_movements[0].voucher
+            token = secrets.token_hex(8).upper()
+            credit = StoreCreditVoucher(
+                code=f'VALE-{token[:4]}-{token[4:8]}-{token[8:12]}-{token[12:]}',
+                original_transaction_id=transaction_id,
+                initial_amount=CUPMoney(f'{restored_credit:.2f}'),
+                balance=CUPMoney(f'{restored_credit:.2f}'), status='Activo',
+                customer=source_voucher.customer or 'Público general',
+                reason=f'Crédito restituido por anulación: {reason}', issued_by=actor,
+            )
+            self.__session.add(credit)
+            self.__session.flush()
+            self.__session.add(StoreCreditMovement(
+                voucher_id=credit.id, movement_type='Emisión',
+                amount=CUPMoney(f'{restored_credit:.2f}'),
+                sale_transaction_id=transaction_id, performed_by=actor,
+            ))
         self.__session.commit()
         self._notify_on_data_changed_listeners()
         return sales
 
     def return_items(self, transaction_id: str, return_plan: list, reason: str,
-                     refund_method: str, actor: str = 'Administrador'):
+                     refund_method: str, actor: str = 'Administrador',
+                     issue_voucher: bool = False, replacement_product_id: int = None,
+                     replacement_quantity: int = 0):
         require_role('superuser')
         """Devuelve unidades elegidas y concilia su destino físico de forma atómica."""
         reason = (reason or '').strip()
         if len(reason) < 5:
             raise ValueError('Escribe un motivo de devolución de al menos 5 caracteres.')
-        if refund_method not in ('Efectivo', 'Tarjeta', 'Transferencia', 'Vale'):
+        if refund_method not in ('Efectivo', 'Tarjeta', 'Transferencia', 'Vale', 'Cambio'):
             raise ValueError('Selecciona un método de reembolso válido.')
 
         allowed_dispositions = ('Reintegrar a inventario', 'Enviar a revisión de merma')
@@ -283,9 +395,18 @@ class SaleRepository(RepositoryObserver):
                or sales_by_id[sale_id].status != 'Completada'
                for sale_id, _ in selected):
             raise ValueError('El ticket cambió o alguna unidad ya fue devuelta o anulada.')
+        original_methods = {
+            (sales_by_id[sale_id].payment_method or '').strip().lower()
+            for sale_id, _ in selected
+        }
+        if refund_method in ('Efectivo', 'Tarjeta', 'Transferencia') and any(
+                method.startswith('vale') for method in original_methods):
+            raise ValueError(
+                'Las compras pagadas total o parcialmente con vale deben regresar a vale.')
 
         now = mexico_now()
         restored = {}
+        voucher = None
         try:
             for sale_id, disposition in selected:
                 sale = sales_by_id[sale_id]
@@ -309,6 +430,31 @@ class SaleRepository(RepositoryObserver):
                     reason=f'Reintegración por devolución: {reason}',
                     reference=transaction_id, performed_by=actor,
                 ))
+            if replacement_product_id is not None:
+                replacement_quantity = int(replacement_quantity)
+                if replacement_quantity <= 0:
+                    raise ValueError('Selecciona cuántas unidades se entregarán.')
+                replacement = self.__session.scalar(
+                    select(Product).where(Product.id == int(replacement_product_id)))
+                if replacement is None or not replacement.is_active:
+                    raise ValueError('El producto de reemplazo ya no está disponible.')
+                if replacement.quantity < replacement_quantity:
+                    raise ValueError('No hay existencia suficiente para realizar el cambio.')
+                returned_value = sum(float(sales_by_id[sale_id].price.amount)
+                                     for sale_id, _ in selected)
+                replacement_value = float(replacement.price.amount) * replacement_quantity
+                if abs(returned_value - replacement_value) >= .01:
+                    raise ValueError(
+                        'El valor total del reemplazo debe ser igual al valor devuelto.')
+                previous_stock = replacement.quantity
+                replacement.quantity -= replacement_quantity
+                self.__session.add(StockMovement(
+                    product_id=replacement.id, movement_type='Salida por cambio',
+                    quantity=-replacement_quantity, previous_stock=previous_stock,
+                    resulting_stock=replacement.quantity,
+                    reason=f'Reemplazo de la venta {transaction_id}: {reason}',
+                    reference=transaction_id, performed_by=actor,
+                ))
             for group in groups:
                 if group.get('disposition') != 'Enviar a revisión de merma':
                     continue
@@ -328,12 +474,50 @@ class SaleRepository(RepositoryObserver):
                     reason=reason,
                     requested_by=actor,
                 ))
+            if issue_voucher:
+                value = sum(float(sales_by_id[sale_id].price.amount)
+                            for sale_id, _ in selected)
+                token = secrets.token_hex(8).upper()
+                voucher = StoreCreditVoucher(
+                    code=f'VALE-{token[:4]}-{token[4:8]}-{token[8:12]}-{token[12:]}',
+                    original_transaction_id=transaction_id,
+                    initial_amount=CUPMoney(f'{value:.2f}'),
+                    balance=CUPMoney(f'{value:.2f}'), status='Activo',
+                    customer=next(iter(sales_by_id.values())).customer,
+                    reason=reason, issued_by=actor,
+                )
+                self.__session.add(voucher)
+                self.__session.flush()
+                self.__session.add(StoreCreditMovement(
+                    voucher_id=voucher.id, movement_type='Emisión',
+                    amount=CUPMoney(f'{value:.2f}'), performed_by=actor,
+                ))
+            if refund_method == 'Efectivo' and self.__enforce_open_cash:
+                value = sum(float(sales_by_id[sale_id].price.amount)
+                            for sale_id, _ in selected)
+                active_opening = self.__session.scalar(
+                    select(CashOpening).where(
+                        CashOpening.date == mexico_today(),
+                        ~select(CashClose.id).where(
+                            CashClose.opening_id == CashOpening.id).exists(),
+                    ).order_by(CashOpening.created_at.desc()).limit(1)
+                )
+                if active_opening is None:
+                    raise ValueError(
+                        'Abre un turno de caja antes de realizar un reembolso en efectivo.')
+                self.__session.add(CashMovement(
+                    opening_id=active_opening.id, date=mexico_today(),
+                    movement_type='Retiro', amount=CUPMoney(f'{value:.2f}'),
+                    reason=f'Reembolso de venta {transaction_id}: {reason}',
+                    authorized_by=actor,
+                ))
             self.__session.commit()
         except Exception:
             self.__session.rollback()
             raise
         self._notify_on_data_changed_listeners()
-        return [sales_by_id[sale_id] for sale_id, _ in selected]
+        returned = [sales_by_id[sale_id] for sale_id, _ in selected]
+        return (returned, voucher) if voucher is not None else returned
 
     def return_transaction(self, transaction_id: str, reason: str, refund_method: str):
         """Compatibilidad: devuelve todo el ticket y reintegra sus existencias."""
@@ -418,6 +602,14 @@ class SaleRepository(RepositoryObserver):
 
     def get_all_sales(self) -> list:
         return self.__session.scalars(select(Sale).where(Sale.status == 'Completada')).all()
+
+    def get_returned_sales_between(self, minimum_date, maximum_date) -> list:
+        """Líneas devueltas cuyo cobro original pertenece al intervalo indicado."""
+        return list(self.__session.scalars(select(Sale).where(
+            Sale.status == 'Devuelta',
+            Sale.date >= minimum_date,
+            Sale.date <= maximum_date,
+        )).all())
 
     def get_sales_by_filter(self, the_filter: SaleFilter) -> list:
         filter_query = SaleRepository.__create_filter_query(the_filter)

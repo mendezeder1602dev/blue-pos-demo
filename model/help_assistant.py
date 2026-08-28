@@ -34,6 +34,77 @@ TOPICS = (
     HelpTopic('¿Cómo personalizar los datos de mi negocio?', 'Abre **Mi perfil**, completa identidad, contacto, ubicación y textos de tickets. Puedes cargar logotipo y color de marca. Pulsa **Guardar** para aplicar los cambios en el sistema y los documentos.', 'Configuración', roles=('admin',), page='Mi perfil', keywords=('logo', 'negocio', 'perfil', 'personalizar')),
     HelpTopic('¿Cómo crear y compartir mi catálogo?', 'Abre **Mi página web** y completa los tres pasos: configuración, productos y vista previa. Selecciona qué artículos serán públicos, agrega fotografías y activa **Publicar catálogo**. Después comparte el enlace o descarga el código QR. El costo, proveedor y stock exacto nunca se muestran.', 'Configuración', roles=('admin',), page='Mi página web', keywords=('pagina web', 'catalogo', 'qr', 'publicar', 'whatsapp')),
     HelpTopic('¿Qué diferencia hay entre venta normal y venta express?', 'La **venta normal** usa productos existentes y descuenta inventario. **Venta express** sirve para un artículo ocasional que no está en el catálogo; después puedes decidir si conviene incorporarlo al inventario.', 'Ventas', roles=('seller',), page='Venta express', keywords=('rapida', 'fuera de inventario', 'express')),
+    HelpTopic(
+        '¿Cuál es la diferencia entre Solo cobrar y Cobrar e imprimir?',
+        '**Solo cobrar** registra la venta, descuenta existencias y muestra una confirmación, pero no envía papel a la impresora. **Cobrar e imprimir** realiza exactamente el mismo cobro y además envía el ticket térmico a la impresora predeterminada. Si la impresión falla, la venta permanece guardada y puedes reimprimirla desde **Movimientos recientes**; no vuelvas a cobrarla.',
+        'Ventas', page='Nueva venta',
+        keywords=('solo cobrar', 'cobrar imprimir', 'confirmacion', 'movimientos recientes')),
+    HelpTopic(
+        '¿Cómo imprimo o reimprimo un ticket de 58 u 80 mm?',
+        'Elige **58 mm** o **80 mm** antes de pulsar **Cobrar e imprimir**. El sistema ajusta el ancho, la altura y los márgenes al contenido real del ticket y utiliza la impresora predeterminada de Windows. Para otra copia, abre **Movimientos recientes**, selecciona el ancho y pulsa **Imprimir ahora**. También puedes descargar el PDF correspondiente. No fijes el tamaño Carta en el controlador de la impresora térmica.',
+        'Impresión', page='Nueva venta',
+        keywords=('ticket', 'imprimir', 'reimprimir', '58 mm', '80 mm', 'margen', 'papel', 'predeterminada')),
+    HelpTopic(
+        '¿Qué hago si la impresora repite tickets o deja mucho papel en blanco?',
+        'Primero cancela el trabajo repetido en la cola de Windows. Si no responde, reinicia la **Cola de impresión (Spooler)** como administrador y elimina únicamente los trabajos pendientes. Después confirma en **Preferencias de impresión** que el papel sea térmico de 58 u 80 mm, sin tamaño Carta ni escalado adicional. Finalmente reimprime una sola vez desde **Movimientos recientes**.',
+        'Impresión', page='Nueva venta',
+        keywords=('spooler', 'cola', 'repite', 'papel blanco', 'margen largo', 'no para')),
+    HelpTopic(
+        '¿Cómo se realiza una devolución parcial?',
+        'En **Devoluciones**, selecciona el ticket original. El sistema agrupa los artículos iguales y muestra la cantidad todavía disponible para devolver. Marca únicamente los productos correspondientes y ajusta sus cantidades; el resto de la venta se conserva. Indica condición, destino y motivo, revisa el importe y confirma **Autorizar devolución**.',
+        'Devoluciones', roles=('admin',), page='Devoluciones',
+        keywords=('devolucion parcial', 'producto repetido', 'cantidad', 'ticket original')),
+    HelpTopic(
+        '¿Qué destino elijo para un producto devuelto?',
+        'Usa **Reintegrar a inventario** sólo cuando el artículo esté completo, funcional y apto para venderse otra vez. Usa **Enviar a revisión o merma** cuando esté dañado, incompleto o exista duda sobre su estado; no vuelve al inventario vendible. La selección queda registrada para auditoría y evita aumentar existencias por error.',
+        'Devoluciones', roles=('admin',), page='Devoluciones',
+        keywords=('buen estado', 'danado', 'merma', 'reintegrar', 'destino', 'revision')),
+    HelpTopic(
+        '¿Cómo cambio un producto por otro?',
+        'Selecciona el ticket y las unidades a devolver, elige **Reemplazar producto** y selecciona el artículo que se entregará. El valor total del reemplazo debe coincidir con el valor autorizado de la devolución. El sistema registra la entrada o destino del artículo recibido y descuenta del inventario el artículo entregado, dejando ambos movimientos relacionados en la auditoría.',
+        'Devoluciones', roles=('admin',), page='Devoluciones',
+        keywords=('cambio', 'reemplazo', 'equipo', 'sustituir', 'entregar otro')),
+    HelpTopic(
+        '¿Cómo emitir un vale por una devolución?',
+        'En **Devoluciones**, revisa productos, cantidades y condición; después elige **Entregar vale**. Al autorizar, el sistema crea un código único con el importe aprobado, lo registra en el historial y envía el comprobante a la impresora térmica predeterminada. El vale no representa efectivo retirado de caja y nunca debe crearse manualmente fuera de la devolución.',
+        'Vales', roles=('admin',), page='Devoluciones',
+        keywords=('emitir vale', 'nota de credito', 'saldo a favor', 'devolucion')),
+    HelpTopic(
+        '¿Cómo cobro una compra utilizando un vale?',
+        'En **Nueva venta** o **Venta express**, selecciona **Vale** y escanea o captura su código. El sistema valida que esté activo y muestra su saldo. Si la compra supera el saldo, elige el complemento: **efectivo, tarjeta o transferencia**, y completa los datos solicitados. Un vale agotado o inexistente no puede utilizarse.',
+        'Vales', page='Nueva venta',
+        keywords=('pagar vale', 'cobrar vale', 'vale con efectivo', 'vale con tarjeta',
+                  'vale con transferencia', 'codigo', 'escanear', 'combinado')),
+    HelpTopic(
+        '¿Qué ocurre si la compra cuesta menos que el saldo del vale?',
+        'El código utilizado queda agotado y el sistema genera automáticamente **un vale nuevo por el remanente**. Ese nuevo código se imprime incluso cuando seleccionaste **Solo cobrar**, porque reemplaza al vale anterior. Entrégalo al cliente y verifica que el aviso muestre el nuevo importe; nunca escribas un saldo manual sobre el vale usado.',
+        'Vales', page='Nueva venta',
+        keywords=('remanente', 'sobrante', 'compra menor', 'saldo', 'nuevo vale', 'cambio')),
+    HelpTopic(
+        '¿Qué hago si el cliente perdió su vale?',
+        'Busca el vale en **Historial de vales** por código, cliente o folio original. Verifica estado y saldo antes de reimprimir. **Reimprimir el mismo vale** conserva el mismo código y no duplica dinero. No generes otro vale para sustituirlo: si el original sigue activo, ambos papeles representarían el mismo saldo y sólo el código registrado será válido.',
+        'Vales', roles=('admin',), page='Devoluciones',
+        keywords=('vale perdido', 'historial', 'reimprimir', 'duplicado', 'saldo')),
+    HelpTopic(
+        '¿Dónde consulto los vales pendientes y cobrados?',
+        'Abre **Historial de vales** desde **Nueva venta** o **Devoluciones**. Filtra por **Por cobrar** para ver códigos activos y su saldo; usa **Cobrados** para consultar los agotados. La búsqueda acepta código, cliente o folio original. Reimprimir no cambia el saldo y consumir un vale actualiza su estado automáticamente.',
+        'Vales', page='Nueva venta',
+        keywords=('historial vales', 'pendientes', 'cobrados', 'activos', 'agotados')),
+    HelpTopic(
+        '¿Cómo afectan los vales al corte de caja?',
+        'El importe pagado con vale se registra como medio no efectivo y **no aumenta el dinero esperado en el cajón**. Si hubo complemento en efectivo, sólo esa parte suma al efectivo; tarjeta y transferencia aparecen en sus propios totales. El vale emitido por devolución tampoco es una salida física de efectivo. Cuenta únicamente billetes y monedas reales al cerrar.',
+        'Caja', page='Corte de caja',
+        keywords=('vale corte', 'cuadrar caja', 'efectivo esperado', 'metodo de pago', 'arqueo')),
+    HelpTopic(
+        '¿Qué hago cuando el efectivo supera el límite recomendado?',
+        'Pulsa el botón **Ir a retiro de seguridad** que aparece en la alerta. Sólo administración puede autorizarlo. Captura el importe realmente retirado y el motivo; el sistema comprueba que no exceda el efectivo disponible, descuenta el retiro del efectivo esperado y conserva responsable, turno y fecha para el corte. Guarda físicamente el dinero según el protocolo del negocio.',
+        'Caja', roles=('admin',), page='Apertura de caja',
+        keywords=('limite caja', 'retiro seguridad', 'exceso efectivo', 'boton retiro')),
+    HelpTopic(
+        '¿Puede el vendedor autorizar devoluciones o retiros?',
+        'No. El vendedor puede cobrar, consultar inventario y realizar su operación de turno, pero las devoluciones, reposiciones, emisión inicial de vales y retiros de seguridad requieren el perfil **Administrador**. Si necesitas una de esas operaciones, conserva el ticket o folio y solicita la autorización sin compartir la contraseña administrativa.',
+        'Seguridad', roles=('seller',),
+        keywords=('permiso vendedor', 'autorizar', 'administrador', 'devolucion', 'retiro')),
 )
 
 STOP_WORDS = frozenset(('a', 'al', 'como', 'de', 'el', 'en', 'es', 'la', 'las',
@@ -64,12 +135,19 @@ def find_answer(query, role):
         searchable_tokens = set(searchable.split()) - STOP_WORDS
         overlap = len(query_tokens & searchable_tokens) / max(1, len(query_tokens))
         phrase_bonus = 0.25 if normalized_query in searchable else 0.0
+        keyword_bonus = 0.0
+        for keyword in topic.keywords:
+            normalized_keyword = normalize(keyword)
+            if (len(normalized_keyword.split()) >= 2
+                    and normalized_keyword in normalized_query):
+                keyword_bonus = 0.22
+                break
         similarity = SequenceMatcher(None, normalized_query, normalize(topic.question)).ratio()
         # Una similitud casual entre frases no basta: debe compartir vocabulario
         # operativo o ser prácticamente la misma pregunta.
         if overlap == 0 and similarity < 0.72:
             continue
-        score = overlap * 0.65 + similarity * 0.35 + phrase_bonus
+        score = overlap * 0.65 + similarity * 0.35 + phrase_bonus + keyword_bonus
         if score > best_score:
             best_topic, best_score = topic, score
     return best_topic if best_score >= 0.34 else None
