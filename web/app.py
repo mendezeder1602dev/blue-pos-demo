@@ -74,7 +74,7 @@ from model.util.monetary_types import CUPMoney
 from model.timezone import mexico_now, mexico_today
 
 LOW_STOCK_THRESHOLD = 5
-PAYMENT_METHODS = ('Efectivo', 'Transferencia', 'Tarjeta', 'Vale')
+PAYMENT_METHODS = ('Efectivo', 'Transferencia', 'Tarjeta', 'Mixto', 'Vale')
 MONTH_NAMES = ('', 'Enero', 'Febrero', 'Marzo', 'Abril', 'Mayo', 'Junio',
                'Julio', 'Agosto', 'Septiembre', 'Octubre', 'Noviembre', 'Diciembre')
 DESCRIPTION_LABEL = 'Descripción'
@@ -348,6 +348,26 @@ def _apply_brand_theme():
     .cart-line-total { color:#101828; font-size:.93rem; font-weight:800; text-align:right; }
     .cart-unit-price { color:#667085; font-size:.68rem; text-align:right; }
     .st-key-checkout_cart [data-testid="stVerticalBlock"] { gap:.5rem; }
+    .st-key-cart_item_list {
+        background:#F3F6FA; border:1px solid #D9E2EC; border-radius:11px;
+        padding:8px; scrollbar-color:#7890AA #E3E9F0; scrollbar-width:thin;
+    }
+    [class*="st-key-cart_tile_"] > div > [data-testid="stVerticalBlock"] {
+        min-height:142px; padding:10px !important; gap:.35rem !important;
+        background:linear-gradient(180deg,#FFFFFF 0%,#F8FAFC 100%);
+        border:1px solid #D5DFEA; border-radius:10px;
+        box-shadow:0 2px 7px rgba(18,59,109,.06);
+    }
+    [class*="st-key-cart_tile_"]:hover > div > [data-testid="stVerticalBlock"] {
+        border-color:#7895B4; box-shadow:0 5px 13px rgba(18,59,109,.11);
+    }
+    [class*="st-key-cart_tile_"] [data-testid="stNumberInput"] input {
+        min-height:36px; padding-left:9px; padding-right:5px;
+    }
+    [class*="st-key-cart_tile_"] button { min-height:36px !important; }
+    .cart-tile-price { color:#0B294E; font-size:.93rem; font-weight:850; line-height:1.15; }
+    .cart-tile-price small { display:block; color:#667085; font-size:.64rem;
+        font-weight:500; margin-top:3px; }
     .st-key-login_shell { max-width:1120px; margin:1.5rem auto 0; }
     .st-key-login_shell > div > [data-testid="stVerticalBlock"] > [data-testid="stHorizontalBlock"] {
         gap:0 !important; align-items:stretch;
@@ -749,9 +769,7 @@ def _render_dashboard():
                     'Precio': st.column_config.NumberColumn(format='$ %.2f MXN'),
                     'Margen': st.column_config.NumberColumn(format='percent'),
                 })
-        if not low_stock and not out_of_stock:
-            st.success(f'Todos los productos tienen más de {LOW_STOCK_THRESHOLD} unidades disponibles.')
-        else:
+        if low_stock or out_of_stock:
             inventory_sections = [
                 ('Productos por agotarse', _inventory_export_rows(low_stock)),
                 ('Productos agotados', _inventory_export_rows(out_of_stock)),
@@ -778,6 +796,46 @@ def _render_dashboard():
 # ---------------------------------------------------------------------------
 # Ventas
 # ---------------------------------------------------------------------------
+
+def _payment_breakdown(payment_method, payment_details, total):
+    """Distribuye un cobro entre métodos para reportes y cortes de caja."""
+    amount = max(0.0, float(total))
+    breakdown = {'Efectivo': 0.0, 'Tarjeta': 0.0, 'Transferencia': 0.0, 'Otros': 0.0}
+    method = (payment_method or '').strip().lower()
+    if method in ('efectivo', 'cash'):
+        breakdown['Efectivo'] = amount
+    elif method == 'tarjeta':
+        breakdown['Tarjeta'] = amount
+    elif method == 'transferencia':
+        breakdown['Transferencia'] = amount
+    elif method == 'mixto':
+        captured = 0.0
+        for label, destination in (
+                ('Efectivo', 'Efectivo'), ('Tarjeta', 'Tarjeta'),
+                ('Transferencia', 'Transferencia')):
+            match = re.search(
+                rf'{label}:\s*\$([\d,]+(?:\.\d{{1,2}})?)', payment_details or '', re.I)
+            part = float(match.group(1).replace(',', '')) if match else 0.0
+            part = min(max(0.0, part), max(0.0, amount - captured))
+            breakdown[destination] += part
+            captured += part
+        breakdown['Otros'] = max(0.0, amount - captured)
+    elif method.startswith('vale + '):
+        match = re.search(
+            r'Aplicado:\s*\$([\d,]+(?:\.\d{1,2})?)', payment_details or '', re.I)
+        voucher_part = float(match.group(1).replace(',', '')) if match else 0.0
+        voucher_part = min(amount, max(0.0, voucher_part))
+        complement = max(0.0, amount - voucher_part)
+        destination = {
+            'efectivo': 'Efectivo', 'tarjeta': 'Tarjeta',
+            'transferencia': 'Transferencia',
+        }.get(method.removeprefix('vale + ').strip(), 'Otros')
+        breakdown[destination] += complement
+        breakdown['Otros'] += voucher_part
+    else:
+        breakdown['Otros'] = amount
+    return breakdown
+
 
 def _payment_controls(prefix, total):
     """Controles de cobro reutilizables y datos seguros para auditoría."""
@@ -819,6 +877,62 @@ def _payment_controls(prefix, total):
         if not transfer_reference:
             validation_error = 'Captura la referencia o clave de rastreo de la transferencia.'
         details.extend([f'Banco: {bank}', f'Referencia: {transfer_reference}'])
+    elif method == 'Mixto':
+        st.caption('Divide el total entre dos o más métodos. La suma debe coincidir con el cobro.')
+        mixed_columns = st.columns(3)
+        cash_amount = mixed_columns[0].number_input(
+            'Efectivo (MXN)', min_value=0.0, max_value=float(total), step=10.0,
+            value=float(total), format='%.2f', key=f'{prefix}_mixed_cash')
+        card_amount = mixed_columns[1].number_input(
+            'Tarjeta (MXN)', min_value=0.0, max_value=float(total), step=10.0,
+            value=0.0, format='%.2f', key=f'{prefix}_mixed_card')
+        transfer_amount = mixed_columns[2].number_input(
+            'Transferencia (MXN)', min_value=0.0, max_value=float(total), step=10.0,
+            value=0.0, format='%.2f', key=f'{prefix}_mixed_transfer')
+        mixed_total = float(cash_amount) + float(card_amount) + float(transfer_amount)
+        difference = float(total) - mixed_total
+        st.metric('Total distribuido', _mxn(mixed_total),
+                  delta=f'{_mxn(abs(difference))} {"faltante" if difference > 0 else "excedente"}'
+                  if abs(difference) >= .01 else 'Completo')
+        active_methods = sum(value > 0 for value in (
+            float(cash_amount), float(card_amount), float(transfer_amount)))
+        if active_methods < 2:
+            validation_error = 'El pago mixto debe combinar al menos dos métodos.'
+        elif abs(difference) >= .01:
+            validation_error = (f'Faltan {_mxn(difference)}.' if difference > 0
+                                else f'La distribución excede el total por {_mxn(abs(difference))}.')
+        details.extend([
+            f'Efectivo: {_mxn(cash_amount)}', f'Tarjeta: {_mxn(card_amount)}',
+            f'Transferencia: {_mxn(transfer_amount)}',
+        ])
+        if float(card_amount) > 0:
+            card_type = st.segmented_control(
+                'Tipo de tarjeta', ('Débito', 'Crédito'), default='Débito',
+                selection_mode='single', width='stretch', key=f'{prefix}_mixed_card_type') or 'Débito'
+            card_columns = st.columns(2)
+            last_four = card_columns[0].text_input(
+                'Últimos 4 dígitos', max_chars=4, placeholder='0000',
+                key=f'{prefix}_mixed_card_last4').strip()
+            authorization = card_columns[1].text_input(
+                'Autorización', placeholder='Folio del voucher',
+                key=f'{prefix}_mixed_card_auth').strip()
+            if len(last_four) != 4 or not last_four.isdigit():
+                validation_error = 'Captura los 4 últimos dígitos de la tarjeta.'
+            details.extend([f'Tarjeta mixta: {card_type}', f'Terminación: {last_four}'])
+            if authorization:
+                details.append(f'Autorización: {authorization}')
+        if float(transfer_amount) > 0:
+            transfer_columns = st.columns(2)
+            bank = transfer_columns[0].selectbox(
+                'Banco receptor', ('BBVA', 'Banamex', 'Santander', 'Banorte', 'HSBC',
+                                   'Banco Azteca', 'Mercado Pago', 'Otro'),
+                key=f'{prefix}_mixed_transfer_bank')
+            transfer_reference = transfer_columns[1].text_input(
+                'Referencia', placeholder='Folio o clave de rastreo',
+                key=f'{prefix}_mixed_transfer_reference').strip()
+            if not transfer_reference:
+                validation_error = 'Captura la referencia de la transferencia.'
+            details.extend([f'Banco: {bank}', f'Referencia: {transfer_reference}'])
     elif method == 'Vale':
         voucher_code = st.text_input(
             'Escanea o captura el vale', placeholder='VALE-XXXX-XXXX-XXXX-XXXX',
@@ -1227,44 +1341,50 @@ def _render_sales():
                 st.caption('Busca un producto y presiona Agregar para iniciar la venta.')
                 st.button('Cobrar', disabled=True, width='stretch', icon=':material/payments:')
             else:
-                total = 0.0
+                total = sum(
+                    st.session_state.pos_cart_prices.get(
+                        product_id, float(product_by_id[product_id].price.amount)
+                    ) * current_quantity
+                    for product_id, current_quantity in cart.items()
+                )
                 cart_items = st.container(
-                    height=270 if distinct_count > 2 else 'content',
-                    border=False, key='cart_item_list')
-                for product_id, current_quantity in list(cart.items()):
-                    product = product_by_id[product_id]
-                    unit_price = st.session_state.pos_cart_prices.get(
-                        product_id, float(product.price.amount))
-                    line_total = unit_price * current_quantity
-                    total += line_total
-                    with cart_items:
-                        st.markdown(
-                            '<div class="cart-item-head">'
-                            f'<div class="cart-item-name">{escape(product.name)}</div>'
-                            f'<span class="cart-quantity-badge">× {current_quantity}</span></div>',
-                            unsafe_allow_html=True)
-                        quantity_column, line_column, remove_column = st.columns(
-                            (1.15, 1.25, .45), vertical_alignment='center'
-                        )
-                        quantity_key = f'cart_qty_{product_id}'
-                        if quantity_key not in st.session_state:
-                            st.session_state[quantity_key] = current_quantity
-                        new_quantity = quantity_column.number_input(
-                            f'Cantidad de {product.name}', min_value=1, max_value=product.quantity,
-                            step=1, key=quantity_key,
-                            label_visibility='collapsed',
-                        )
-                        if int(new_quantity) != current_quantity:
-                            _set_cart_quantity(product_id, new_quantity)
-                            st.rerun()
-                        line_column.markdown(
-                            f'<div class="cart-line-total">{_mxn(line_total)}</div>'
-                            f'<div class="cart-unit-price">{_mxn(unit_price)} c/u</div>',
-                            unsafe_allow_html=True)
-                        if remove_column.button('', key=f'remove_cart_{product_id}',
-                                                icon=':material/delete:'):
-                            _remove_from_cart(product_id)
-                            st.rerun()
+                    height=440 if distinct_count > 4 else 'content',
+                    border=False, key='cart_item_list', gap='xsmall')
+                cart_entries = list(cart.items())
+                for row_start in range(0, distinct_count, 2):
+                    tile_columns = cart_items.columns(2, gap='xsmall')
+                    for tile_column, (product_id, current_quantity) in zip(
+                            tile_columns, cart_entries[row_start:row_start + 2]):
+                        product = product_by_id[product_id]
+                        unit_price = st.session_state.pos_cart_prices.get(
+                            product_id, float(product.price.amount))
+                        line_total = unit_price * current_quantity
+                        with tile_column.container(
+                                border=False, key=f'cart_tile_{product_id}'):
+                            st.markdown(
+                                '<div class="cart-item-head">'
+                                f'<div class="cart-item-name">{escape(product.name)}</div>'
+                                f'<span class="cart-quantity-badge">× {current_quantity}</span></div>'
+                                f'<div class="cart-tile-price">{_mxn(line_total)}'
+                                f'<small>{_mxn(unit_price)} c/u</small></div>',
+                                unsafe_allow_html=True)
+                            quantity_column, remove_column = st.columns(
+                                (1, .38), vertical_alignment='center')
+                            quantity_key = f'cart_qty_{product_id}'
+                            if quantity_key not in st.session_state:
+                                st.session_state[quantity_key] = current_quantity
+                            new_quantity = quantity_column.number_input(
+                                f'Cantidad de {product.name}', min_value=1,
+                                max_value=product.quantity, step=1, key=quantity_key,
+                                label_visibility='collapsed')
+                            if int(new_quantity) != current_quantity:
+                                _set_cart_quantity(product_id, new_quantity)
+                                st.rerun()
+                            if remove_column.button(
+                                    '', key=f'remove_cart_{product_id}',
+                                    icon=':material/delete:', help=f'Quitar {product.name}'):
+                                _remove_from_cart(product_id)
+                                st.rerun()
 
                 st.markdown(
                     f'<div class="pos-total"><small>TOTAL A COBRAR</small>'
@@ -3016,29 +3136,11 @@ def _cash_close_summary(close_date: date, opening=None, closed_at=None):
         grouped_sales.setdefault(sale.transaction_id or f'legacy-{sale.id}', []).append(sale)
     for operation_id, operation_sales in grouped_sales.items():
         amount = sum(float(sale.price.amount) for sale in operation_sales)
-        method = (operation_sales[0].payment_method or '').strip().lower()
-        if method == 'efectivo' or method == 'cash':
-            totals['Efectivo'] += amount
-        elif method == 'tarjeta':
-            totals['Tarjeta'] += amount
-        elif method == 'transferencia':
-            totals['Transferencia'] += amount
-        elif method.startswith('vale + '):
-            details = operation_sales[0].payment_details or ''
-            match = re.search(
-                r'Aplicado:\s*\$([\d,]+(?:\.\d{1,2})?)', details)
-            voucher_part = float(match.group(1).replace(',', '')) if match else 0.0
-            voucher_part = min(amount, max(0.0, voucher_part))
-            complement_part = max(0.0, amount - voucher_part)
-            complement_method = method.removeprefix('vale + ').strip()
-            destination = {
-                'efectivo': 'Efectivo', 'tarjeta': 'Tarjeta',
-                'transferencia': 'Transferencia',
-            }.get(complement_method, 'Otros')
-            totals[destination] += complement_part
-            totals['Otros'] += voucher_part
-        else:
-            totals['Otros'] += amount
+        breakdown = _payment_breakdown(
+            operation_sales[0].payment_method,
+            operation_sales[0].payment_details or '', amount)
+        for destination, value in breakdown.items():
+            totals[destination] += value
         operations.add(operation_id)
     return result, totals, len(operations)
 
@@ -3916,12 +4018,17 @@ def _render_statistics():
 
     if period == 'Día':
         payment_totals = {'Efectivo': 0.0, 'Tarjeta': 0.0, 'Transferencia': 0.0, 'Otros': 0.0}
+        grouped_payments = {}
         for sale in result['sales']:
-            method = (sale.payment_method or '').strip().lower()
-            key = ('Efectivo' if method in ('efectivo', 'cash') else
-                   'Tarjeta' if method == 'tarjeta' else
-                   'Transferencia' if method == 'transferencia' else 'Otros')
-            payment_totals[key] += float(sale.price.amount)
+            grouped_payments.setdefault(
+                sale.transaction_id or f'legacy-{sale.id}', []).append(sale)
+        for operation_sales in grouped_payments.values():
+            operation_total = sum(float(sale.price.amount) for sale in operation_sales)
+            breakdown = _payment_breakdown(
+                operation_sales[0].payment_method,
+                operation_sales[0].payment_details or '', operation_total)
+            for destination, value in breakdown.items():
+                payment_totals[destination] += value
         st.subheader('Ventas por método de pago')
         st.bar_chart(pd.DataFrame({
             'Método': list(payment_totals), 'Importe (MXN)': list(payment_totals.values())
