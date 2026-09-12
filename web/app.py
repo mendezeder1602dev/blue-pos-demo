@@ -535,7 +535,7 @@ def _apply_brand_theme():
     }
     /* Streamlit apila columnas demasiado tarde para una caja POS. En pantallas
        medianas dejamos cada panel a ancho completo para evitar controles cortados. */
-    @media (max-width: 1050px) {
+    @media (max-width: 760px) {
         .st-key-pos_workspace > div > [data-testid="stVerticalBlock"] >
         [data-testid="stHorizontalBlock"] {
             flex-direction:column !important;
