@@ -44,6 +44,18 @@ except FileNotFoundError:
     pass
 
 from model import economy, schema
+from model.color_safety import (
+    DEFAULT_APP_BACKGROUND,
+    DEFAULT_APP_SURFACE,
+    DEFAULT_APP_TEXT,
+    DEFAULT_BRAND_COLOR,
+    DEFAULT_DOCUMENT_TEXT,
+    contrast_ratio,
+    default_color_palette,
+    normalize_hex_color,
+    readable_text_color,
+    suggested_color_palette,
+)
 from model.help_assistant import find_answer, topics_for_role
 from model.online_support import (
     OnlineSupportError, ask_online_support, is_available as online_support_available,
@@ -56,7 +68,8 @@ from model.inventory_excel import (
 from model.upload_security import validate_image_upload
 from model.authorization import authorization_context
 from model.repository.catalog import normalize_catalog_slug
-from model.database_utilities import backup_database_bytes
+from model.database_utilities import (backup_database_bytes, restore_database_bytes,
+                                      scheduled_backup)
 from model.entity.models import CashClose, CashMovement, CashOpening, Expense, Product, Quote, QuoteItem, Sale
 from model.repository.expense import ExpenseFilter
 from model.repository.exc.product import UniqueProductBarcodeException, UniqueProductNameException
@@ -66,6 +79,7 @@ from model.repository.sale import SaleFilter
 from model.report.exports import (
     business_as_dict,
     generate_excel_bytes as _generate_excel_bytes,
+    generate_html_bytes as _generate_html_bytes,
     generate_pdf_bytes as _generate_pdf_bytes,
 )
 from model.report.ticket import generate_thermal_ticket_bytes as _generate_thermal_ticket_bytes
@@ -74,7 +88,7 @@ from model.util.monetary_types import CUPMoney
 from model.timezone import mexico_now, mexico_today
 
 LOW_STOCK_THRESHOLD = 5
-PAYMENT_METHODS = ('Efectivo', 'Transferencia', 'Tarjeta', 'Mixto', 'Vale')
+PAYMENT_METHODS = ('Efectivo', 'Transferencia', 'Tarjeta', 'Crédito', 'Mixto', 'Vale')
 MONTH_NAMES = ('', 'Enero', 'Febrero', 'Marzo', 'Abril', 'Mayo', 'Junio',
                'Julio', 'Agosto', 'Septiembre', 'Octubre', 'Noviembre', 'Diciembre')
 DESCRIPTION_LABEL = 'Descripción'
@@ -94,7 +108,7 @@ CASH_DENOMINATIONS = (
     ('coin_1', 'Moneda mexicana · 1 MXN', 1.0),
     ('coin_050', 'Moneda mexicana · 0.50 MXN', .5),
 )
-WORKSPACE_SCHEMA_VERSION = 4
+WORKSPACE_SCHEMA_VERSION = 8
 
 
 @st.cache_data(ttl='10m', max_entries=48, show_spinner=False)
@@ -120,6 +134,16 @@ def generate_pdf_bytes(business, title, subtitle, sections):
 def generate_excel_bytes(business, title, subtitle, sections):
     """Devuelve un callback: Streamlit construye Excel únicamente al descargar."""
     return lambda: _cached_excel_bytes(business, title, subtitle, sections)
+
+
+@st.cache_data(ttl='10m', max_entries=48, show_spinner=False)
+def _cached_html_bytes(business, title, subtitle, sections):
+    return _generate_html_bytes(business, title, subtitle, sections)
+
+
+def generate_html_bytes(business, title, subtitle, sections):
+    """Devuelve un callback: Streamlit construye HTML únicamente al descargar."""
+    return lambda: _cached_html_bytes(business, title, subtitle, sections)
 
 
 @st.cache_data(ttl='10m', max_entries=96, show_spinner=False)
@@ -171,6 +195,19 @@ def _sale_folio(sale_id):
     """Folio comercial corto; el identificador interno nunca se muestra al cliente."""
     return f'V-{int(sale_id):06d}'
 
+
+def _sale_register_folio(sale):
+    """Folio visible preparado para multicaja y futuro modo offline."""
+    register_code = ''
+    register = getattr(sale, 'register', None)
+    if register is not None:
+        register_code = getattr(register, 'code', '') or ''
+    if not register_code:
+        register_name = getattr(sale, 'register_name', '') or ''
+        register_code = re.sub(r'[^A-Za-z0-9]+', '-', register_name).strip('-').upper()
+    register_code = register_code or 'V'
+    return f'{register_code}-{int(sale.id):06d}'
+
 st.set_page_config(page_title='Puntos ECCOS', page_icon='🛒', layout='wide')
 
 # Los traductores automáticos del navegador reemplazan nodos de texto directamente.
@@ -190,10 +227,10 @@ def _apply_brand_theme():
     <style>
     :root { --sidebar:#08111F; --primary:#123B6D; --primary-dark:#0B294E;
             --ink:#111820; --muted:#5F6873; --line:#D8DDE4; --canvas:#F1F3F6;
-            --success:#12805C; --danger:#C73E4D; }
-    html, body, .stApp { background:#F1F3F6 !important; color:#111418 !important; }
+            --surface:#FFFFFF; --on-primary:#FFFFFF; --success:#12805C; --danger:#C73E4D; }
+    html, body, .stApp { background:var(--canvas) !important; color:var(--ink) !important; }
     [data-testid="stHeader"] {
-        background:#FFFFFF !important; border-bottom:1px solid #D8DEE7 !important;
+        background:var(--surface) !important; border-bottom:1px solid #D8DEE7 !important;
         opacity:1 !important;
     }
     [data-testid="stSidebar"] { background:var(--sidebar); border-right:1px solid #26374A; }
@@ -216,15 +253,23 @@ def _apply_brand_theme():
     .sidebar-user-role { color:#9FB0C3; font-size:.7rem; font-weight:650; }
     .sidebar-section-label { color:#7F95AB; font-size:.65rem; font-weight:850;
         letter-spacing:.11em; margin:.85rem 0 .28rem; text-transform:uppercase; }
-    [class*="st-key-nav_"] button { min-height:38px !important; justify-content:flex-start;
+    [class*="st-key-nav_"] button { min-height:38px !important;
+        justify-content:flex-start !important; text-align:left !important;
         padding:.4rem .7rem !important; border-color:transparent !important; }
+    [class*="st-key-nav_"] button [data-testid="stMarkdownContainer"],
+    [class*="st-key-nav_"] button [data-testid="stMarkdownContainer"] p {
+        text-align:left !important; }
     [class*="st-key-nav_"] button[kind="secondary"] { background:transparent !important; }
     [class*="st-key-nav_"] button[kind="secondary"] p,
     [class*="st-key-nav_"] button[kind="secondary"] span { color:#DDE7F1 !important; }
     [class*="st-key-nav_"] button[kind="secondary"]:hover { background:#111E2F !important;
         border-color:#2C435D !important; }
     [class*="st-key-sidebar_utility_"] button { min-height:38px !important;
+        justify-content:flex-start !important; text-align:left !important;
         padding:.35rem .5rem !important; }
+    [class*="st-key-sidebar_utility_"] button [data-testid="stMarkdownContainer"],
+    [class*="st-key-sidebar_utility_"] button [data-testid="stMarkdownContainer"] p {
+        text-align:left !important; }
     [data-testid="stSidebar"] [data-testid="stExpander"] { background:#0B1727 !important;
         border-color:#263A52 !important; box-shadow:none; }
     [data-testid="stSidebar"] [data-testid="stExpander"] summary p {
@@ -237,19 +282,53 @@ def _apply_brand_theme():
     [data-testid="stMainBlockContainer"] h1,
     [data-testid="stMainBlockContainer"] h2,
     [data-testid="stMainBlockContainer"] h3,
-    [data-testid="stMainBlockContainer"] strong { color:#101828; }
-    .eccos-hero { background:#FFFFFF !important; border:1px solid #D8DEE7;
-        border-left:6px solid #123B6D; border-radius:12px; padding:20px 24px;
+    [data-testid="stMainBlockContainer"] strong { color:var(--ink); }
+    .eccos-hero { background:var(--surface) !important; border:1px solid #D8DEE7;
+        border-left:6px solid var(--primary); border-radius:12px; padding:20px 24px;
         margin:0 0 20px; box-shadow:0 5px 18px rgba(24,34,48,.07); opacity:1; }
     [data-testid="stMainBlockContainer"] .eccos-hero .eccos-eyebrow {
-        color:#123B6D !important; font-size:.72rem; font-weight:800; letter-spacing:.11em;
+        color:var(--primary) !important; font-size:.72rem; font-weight:800; letter-spacing:.11em;
     }
     [data-testid="stMainBlockContainer"] .eccos-hero .eccos-title {
-        color:#101828 !important; font-size:1.65rem; font-weight:750; margin:.2rem 0;
+        color:var(--ink) !important; font-size:1.65rem; font-weight:750; margin:.2rem 0;
         text-shadow:none;
     }
     [data-testid="stMainBlockContainer"] .eccos-hero .eccos-copy {
         color:#475467 !important; font-size:.94rem; font-weight:500; line-height:1.55; margin:0;
+    }
+    .eccos-command-center {
+        background:linear-gradient(135deg,#07172A 0%,var(--primary) 58%,#1E5A96 100%);
+        border:1px solid rgba(255,255,255,.18); border-radius:18px; padding:18px 20px;
+        margin:0 0 18px; color:#FFFFFF; box-shadow:0 14px 34px rgba(7,23,42,.16);
+    }
+    .eccos-command-center small {
+        display:block; color:#BBD2EA; font-size:.68rem; font-weight:850;
+        letter-spacing:.13em; text-transform:uppercase; margin-bottom:3px;
+    }
+    .eccos-command-center h2 {
+        color:#FFFFFF !important; margin:0 0 4px !important;
+        font-size:clamp(1.2rem,2.2vw,1.8rem) !important;
+    }
+    .eccos-command-center p { color:#EAF2F8; margin:0; font-size:.88rem; line-height:1.45; }
+    .eccos-system-strip {
+        display:flex; flex-wrap:wrap; gap:8px; margin-top:12px;
+    }
+    .eccos-system-pill {
+        display:inline-flex; align-items:center; gap:6px; padding:6px 9px;
+        border:1px solid rgba(255,255,255,.18); border-radius:999px;
+        background:rgba(255,255,255,.09); color:#FFFFFF; font-size:.72rem; font-weight:720;
+    }
+    .eccos-lane-title {
+        color:#344054; font-size:.72rem; font-weight:850; letter-spacing:.12em;
+        text-transform:uppercase; margin:.25rem 0 .4rem;
+    }
+    .eccos-page-jump [data-testid="stSelectbox"] { margin-top:-.15rem; }
+    .eccos-next-actions [data-testid="stVerticalBlock"] { gap:.45rem; }
+    .eccos-next-actions .stButton > button {
+        min-height:44px; border-radius:12px; justify-content:flex-start;
+    }
+    .eccos-next-actions .stButton > button [data-testid="stMarkdownContainer"] p {
+        text-align:left !important; font-weight:760 !important;
     }
     [data-testid="stMetric"] { background:white; border:1px solid var(--line); border-radius:12px;
         padding:12px 14px; min-height:112px; box-shadow:0 3px 10px rgba(24,34,48,.04); }
@@ -311,10 +390,10 @@ def _apply_brand_theme():
     .st-key-pos_workspace [data-testid="stNumberInput"] input { min-width:0; }
     .st-key-product_grid {
         background:#E9EDF2; border:1px solid #D8DEE7; border-radius:12px;
-        padding:10px; scrollbar-color:#73859A #E1E6EC; scrollbar-width:thin;
+        padding:8px; scrollbar-color:#73859A #E1E6EC; scrollbar-width:thin;
     }
     [class*="st-key-product_card_"] > div > [data-testid="stVerticalBlock"] {
-        min-height:188px; padding:13px !important; gap:.38rem !important;
+        height:198px; min-height:198px; padding:10px !important; gap:.28rem !important;
         background:linear-gradient(180deg,#FFFFFF 0%,#F8FAFC 100%);
         border:1px solid #D7DEE7; border-radius:11px;
         box-shadow:0 3px 9px rgba(20,35,55,.06);
@@ -325,24 +404,27 @@ def _apply_brand_theme():
     .product-card-top { display:flex; justify-content:space-between; align-items:flex-start; gap:8px; }
     .product-card-icon { width:31px; height:31px; flex:0 0 31px; display:grid; place-items:center;
         background:#E7EEF6; color:#123B6D; border-radius:8px; font-weight:900; }
-    .product-card-name { color:#101828; font-size:.92rem; font-weight:750; line-height:1.2;
-        min-height:2.35em; overflow:hidden; }
-    .product-card-price { color:#0B294E; font-size:1.25rem; font-weight:850; margin:.15rem 0; }
+    .product-card-name { color:#101828; font-size:.88rem; font-weight:750; line-height:1.18;
+        height:2.36em; overflow:hidden; display:-webkit-box; -webkit-box-orient:vertical;
+        -webkit-line-clamp:2; }
+    .product-card-price { color:#0B294E; font-size:1.12rem; font-weight:850; margin:.1rem 0; }
     .product-card-meta { color:#667085; font-size:.7rem; white-space:nowrap;
         overflow:hidden; text-overflow:ellipsis; }
     .product-card-stock { display:inline-block; border-radius:20px; padding:2px 8px;
         background:#E7F6EF; color:#087451; font-size:.67rem; font-weight:800; }
     .product-card-stock.low { background:#FFF2D8; color:#9A5B00; }
-    [class*="st-key-product_card_"] button { min-height:34px !important; margin-top:2px; }
+    [class*="st-key-product_card_"] [data-testid="stButton"] { margin-top:auto; }
+    [class*="st-key-product_card_"] button { min-height:34px !important; }
     .cart-summary-bar { display:flex; justify-content:space-between; align-items:center;
         background:#EAF0F7; border:1px solid #D6E0EA; border-radius:9px;
         padding:8px 11px; margin:2px 0 8px; }
     .cart-summary-bar strong { color:#0B294E !important; font-size:.82rem; }
     .cart-summary-bar span { color:#5F6873; font-size:.72rem; }
-    .cart-item-head { display:flex; align-items:center; justify-content:space-between;
+    .cart-item-head { display:flex; align-items:flex-start; justify-content:space-between;
         gap:8px; margin-bottom:2px; }
     .cart-item-name { color:#101828; font-size:.88rem; font-weight:760;
-        line-height:1.25; overflow:hidden; text-overflow:ellipsis; }
+        line-height:1.2; min-height:2.1em; overflow:hidden; display:-webkit-box;
+        -webkit-box-orient:vertical; -webkit-line-clamp:2; }
     .cart-quantity-badge { flex:0 0 auto; background:#123B6D; color:#FFFFFF;
         border-radius:20px; padding:3px 8px; font-size:.7rem; font-weight:850; }
     .cart-line-total { color:#101828; font-size:.93rem; font-weight:800; text-align:right; }
@@ -350,10 +432,17 @@ def _apply_brand_theme():
     .st-key-checkout_cart [data-testid="stVerticalBlock"] { gap:.5rem; }
     .st-key-cart_item_list {
         background:#F3F6FA; border:1px solid #D9E2EC; border-radius:11px;
-        padding:8px; scrollbar-color:#7890AA #E3E9F0; scrollbar-width:thin;
+        padding:8px 6px 8px 8px; overflow-y:auto !important;
+        scrollbar-gutter:stable; scrollbar-color:#7890AA #E3E9F0;
+        scrollbar-width:thin;
     }
+    .st-key-cart_item_list::-webkit-scrollbar { width:8px; }
+    .st-key-cart_item_list::-webkit-scrollbar-track {
+        background:#E3E9F0; border-radius:10px; }
+    .st-key-cart_item_list::-webkit-scrollbar-thumb {
+        background:#7890AA; border:2px solid #E3E9F0; border-radius:10px; }
     [class*="st-key-cart_tile_"] > div > [data-testid="stVerticalBlock"] {
-        min-height:142px; padding:10px !important; gap:.35rem !important;
+        min-height:116px; padding:8px !important; gap:.25rem !important;
         background:linear-gradient(180deg,#FFFFFF 0%,#F8FAFC 100%);
         border:1px solid #D5DFEA; border-radius:10px;
         box-shadow:0 2px 7px rgba(18,59,109,.06);
@@ -362,12 +451,12 @@ def _apply_brand_theme():
         border-color:#7895B4; box-shadow:0 5px 13px rgba(18,59,109,.11);
     }
     [class*="st-key-cart_tile_"] [data-testid="stNumberInput"] input {
-        min-height:36px; padding-left:9px; padding-right:5px;
+        min-height:32px; height:32px; padding-left:8px; padding-right:4px;
     }
-    [class*="st-key-cart_tile_"] button { min-height:36px !important; }
-    .cart-tile-price { color:#0B294E; font-size:.93rem; font-weight:850; line-height:1.15; }
+    [class*="st-key-cart_tile_"] button { min-height:32px !important; height:32px; }
+    .cart-tile-price { color:#0B294E; font-size:.88rem; font-weight:850; line-height:1.1; }
     .cart-tile-price small { display:block; color:#667085; font-size:.64rem;
-        font-weight:500; margin-top:3px; }
+        font-weight:500; margin-top:2px; }
     .st-key-login_shell { max-width:1120px; margin:1.5rem auto 0; }
     .st-key-login_shell > div > [data-testid="stVerticalBlock"] > [data-testid="stHorizontalBlock"] {
         gap:0 !important; align-items:stretch;
@@ -437,7 +526,7 @@ def _apply_brand_theme():
             flex-direction:row !important;
         }
         .st-key-product_grid [data-testid="stHorizontalBlock"] > [data-testid="stColumn"] {
-            width:33.333% !important; flex:1 1 33.333% !important;
+            width:50% !important; flex:1 1 50% !important; min-width:0 !important;
         }
         .st-key-login_shell { margin-top:0; }
         .st-key-login_shell > div > [data-testid="stVerticalBlock"] >
@@ -454,9 +543,9 @@ def _apply_brand_theme():
         .eccos-hero { padding:12px 14px; margin-bottom:12px; }
         .eccos-copy { display:none; }
         .st-key-pos_workspace button { min-height:38px; }
-        .st-key-product_grid [data-testid="stHorizontalBlock"] { flex-direction:column !important; }
+        .st-key-product_grid [data-testid="stHorizontalBlock"] { flex-direction:row !important; }
         .st-key-product_grid [data-testid="stHorizontalBlock"] > [data-testid="stColumn"] {
-            width:100% !important; flex:1 1 100% !important;
+            width:50% !important; flex:1 1 50% !important; min-width:0 !important;
         }
     }
     hr { border-color:var(--line); }
@@ -514,6 +603,113 @@ def _render_activity_notice():
     }.get(notice.get('tone'), st.success)
     renderer(message, icon=notice.get('icon'))
     st.toast(title, icon=notice.get('icon'))
+
+
+def _page_icon(page_name):
+    icons = {
+        'Tablero': ':material/dashboard:',
+        'Mi jornada': ':material/dashboard:',
+        'Ventas': ':material/point_of_sale:',
+        'Nueva venta': ':material/point_of_sale:',
+        'Venta express': ':material/bolt:',
+        'Cotizaciones': ':material/request_quote:',
+        'Inventario': ':material/inventory_2:',
+        'Movimientos': ':material/sync_alt:',
+        'Apertura de caja': ':material/lock_open:',
+        'Corte de caja': ':material/lock:',
+        'Historial de turnos y cortes': ':material/receipt_long:',
+        'Gastos': ':material/payments:',
+        'Créditos y cartera': ':material/account_balance_wallet:',
+        'Clientes': ':material/groups:',
+        'Abastecimiento': ':material/local_shipping:',
+        'Reportes': ':material/description:',
+        'Estadísticas': ':material/query_stats:',
+        'Centro de incidencias': ':material/notifications:',
+        'Auditoría': ':material/history:',
+        'Mi página web': ':material/language:',
+        'Asistente ECCOS': ':material/support_agent:',
+    }
+    return icons.get(page_name, ':material/apps:')
+
+
+def _command_action_definitions(is_admin):
+    if is_admin:
+        return (
+            ('Cobrar ahora', 'Ventas', ':material/point_of_sale:', 'Registra una venta completa.'),
+            ('Venta express', 'Venta express', ':material/bolt:', 'Cobra un artículo ocasional.'),
+            ('Agregar producto', 'Inventario', ':material/add_box:', 'Alta o edición de inventario.'),
+            ('Revisar caja', 'Corte de caja', ':material/lock:', 'Conciliación y cierre.'),
+            ('Cobranza', 'Créditos y cartera', ':material/account_balance_wallet:',
+             'Cuentas por cobrar y abonos.'),
+        )
+    return (
+        ('Cobrar ahora', 'Nueva venta', ':material/point_of_sale:', 'Registra una venta.'),
+        ('Venta express', 'Venta express', ':material/bolt:', 'Cobra rápido.'),
+        ('Cotizar', 'Cotizaciones', ':material/request_quote:', 'Prepara una cotización.'),
+        ('Abrir caja', 'Apertura de caja', ':material/lock_open:', 'Consulta tu turno.'),
+    )
+
+
+def _navigate_from_page_jump(state_key):
+    target = st.session_state.get(state_key)
+    if target:
+        _navigate_to_page(target)
+
+
+def _render_command_center(user, pages, business_profile):
+    """Barra superior de operación: contexto, búsqueda de módulos y acciones clave."""
+    current_page = st.session_state.get('page') or next(iter(pages))
+    role_label = 'Administrador' if _is_administrator() else 'Vendedor'
+    display_name = getattr(user, 'display_name', '') or getattr(user, 'username', role_label)
+    try:
+        opening = RepositoryFactory.get_cash_control_repository().get_opening(mexico_today())
+    except Exception:
+        opening = None
+    cash_status = (
+        f'Turno activo · {opening.shift_responsible}' if opening
+        else 'Sin turno de caja activo'
+    )
+    business_name = escape(business_profile.business_name or 'Puntos ECCOS')
+    st.markdown(
+        '<section class="eccos-command-center">'
+        '<small>Centro de mando web</small>'
+        f'<h2>{business_name} · {escape(current_page)}</h2>'
+        f'<p>{escape(display_name)} · {role_label} · {escape(cash_status)}</p>'
+        '<div class="eccos-system-strip">'
+        f'<span class="eccos-system-pill">Fecha · {mexico_today():%d/%m/%Y}</span>'
+        '<span class="eccos-system-pill">Módulo actual</span>'
+        '<span class="eccos-system-pill">Operación local segura</span>'
+        '</div></section>',
+        unsafe_allow_html=True,
+    )
+
+    with st.container(border=True):
+        st.markdown('<div class="eccos-lane-title">Acciones rápidas</div>',
+                    unsafe_allow_html=True)
+        action_columns = st.columns(5 if _is_administrator() else 4)
+        for column, (label, target, icon, help_text) in zip(
+                action_columns, _command_action_definitions(_is_administrator())):
+            if target in pages:
+                column.button(
+                    label, icon=icon, width='stretch',
+                    type='primary' if current_page == target else 'secondary',
+                    help=help_text, key=f'command_action_{target}',
+                    on_click=_navigate_to_page, args=(target,))
+        st.markdown('<div class="eccos-lane-title">Buscar módulo</div>',
+                    unsafe_allow_html=True)
+        page_names = list(pages)
+        st.session_state.setdefault('command_center_page_jump', current_page)
+        st.selectbox(
+            'Buscar módulo del sistema',
+            page_names,
+            index=page_names.index(current_page) if current_page in page_names else 0,
+            format_func=lambda page: f'{page}',
+            label_visibility='collapsed',
+            key='command_center_page_jump',
+            on_change=_navigate_from_page_jump,
+            args=('command_center_page_jump',),
+            width='stretch',
+        )
 
 
 _apply_brand_theme()
@@ -578,10 +774,10 @@ def _render_login():
           <p>Selecciona tu perfil para comenzar tu jornada.</p>
         </div>
         ''', unsafe_allow_html=True)
-        role_label = st.radio(
-            'Tipo de acceso', ('Administrador', 'Vendedor'), index=0,
-            horizontal=True, key='login_role',
-        )
+        role_label = st.segmented_control(
+            'Tipo de acceso', ('Administrador', 'Vendedor'), default='Administrador',
+            selection_mode='single', width='stretch', key='login_role',
+        ) or 'Administrador'
 
         if role_label == 'Administrador':
             with st.form('login_form', border=False, enter_to_submit=False):
@@ -610,11 +806,32 @@ def _render_login():
                 else:
                     _log_in(user)
         else:
-            st.caption('Acceso rápido para cobrar y consultar existencias, sin información financiera sensible.')
-            if st.button(
-                'Abrir punto de venta', type='primary', width='stretch', icon=':material/point_of_sale:'
-            ):
-                _log_in(_enter_seller())
+            st.caption('Ingresa con la cuenta asignada por administración para iniciar tu jornada.')
+            with st.form('seller_login_form', border=False, enter_to_submit=False):
+                username = st.text_input(
+                    'Usuario', placeholder='Escribe tu usuario', icon=':material/person:',
+                    key='seller_login_username')
+                password = st.text_input(
+                    'Contraseña', type='password', placeholder='Escribe tu contraseña',
+                    icon=':material/lock:', key='seller_login_password')
+                submitted = st.form_submit_button(
+                    'Iniciar sesión', type='primary', width='stretch', icon=':material/login:')
+            if submitted:
+                users = RepositoryFactory.get_user_repository()
+                user = users.authenticate(username.strip(), password)
+                if user is None:
+                    blocked_seconds = users.login_block_seconds(username.strip())
+                    if blocked_seconds:
+                        remaining = max(1, blocked_seconds // 60 + 1)
+                        st.error(
+                            f'Acceso bloqueado temporalmente. Intenta nuevamente en '
+                            f'{remaining} minuto(s).', icon=':material/timer:')
+                    else:
+                        st.error('Usuario o contraseña incorrectos.', icon=':material/error:')
+                elif user.role != 'seller':
+                    st.error('Selecciona el perfil asociado a esta cuenta.', icon=':material/error:')
+                else:
+                    _log_in(user)
 
         with st.expander('Recuperar acceso de administrador', icon=':material/key:'):
             with st.form('recovery_form', border=False, enter_to_submit=False):
@@ -699,6 +916,25 @@ def _inventory_export_rows(products):
     } for product in products]
 
 
+def _dashboard_metric_card(label, value, target, detail, key, delta=None,
+                           delta_color='normal', icon=':material/arrow_forward:',
+                           callback=None, callback_args=None):
+    """Indicador accionable: muestra el dato y abre el detalle relacionado."""
+    with st.container(border=True):
+        st.metric(label, value, delta=delta, delta_color=delta_color)
+        st.caption(detail)
+        st.button(
+            'Ver detalle', icon=icon, width='stretch', key=key,
+            on_click=callback or _navigate_to_page,
+            args=callback_args if callback_args is not None else (target,))
+
+
+def _dashboard_sales_detail_card(label, value, detail, key, delta=None):
+    _dashboard_metric_card(
+        label, value, 'Ventas', detail, key, delta=delta,
+        icon=':material/receipt_long:', callback=_open_sales_history, callback_args=())
+
+
 def _render_dashboard():
     _hero('Centro de operación', 'Ventas, inventario y resultados del negocio en una sola vista.')
     summary = RepositoryFactory.get_economic_summary_repository().get_economic_summary_on_day(mexico_today())
@@ -708,13 +944,148 @@ def _render_dashboard():
         if not product.is_temporary
     ]
     product_quantity = len(catalog_products)
-    primary_metrics = st.columns(3)
-    primary_metrics[0].metric('Ventas de hoy', _mxn(summary.acquired_money.amount))
-    primary_metrics[1].metric('Operaciones', str(today_summary['sale_quantity']))
-    primary_metrics[2].metric('Utilidad neta', _mxn(summary.net_profit.amount))
-    secondary_metrics = st.columns(2)
-    secondary_metrics[0].metric('Gastos de hoy', _mxn(summary.total_expense.amount))
-    secondary_metrics[1].metric('Productos', str(product_quantity))
+    primary_metrics = st.columns(4)
+    with primary_metrics[0]:
+        _dashboard_sales_detail_card(
+            'Ventas de hoy', _mxn(summary.acquired_money.amount),
+            'Abre el historial de ventas para revisar tickets, método, cliente y responsable.',
+            'dashboard_metric_today_sales')
+    with primary_metrics[1]:
+        _dashboard_sales_detail_card(
+            'Operaciones', str(today_summary['sale_quantity']),
+            'Muestra las operaciones/tickets que forman este conteo.',
+            'dashboard_metric_operations')
+    with primary_metrics[2]:
+        _dashboard_metric_card(
+            'Utilidad neta', _mxn(summary.net_profit.amount), 'Reportes',
+            'Abre reportes con ventas, costos, gastos y utilidad del periodo.',
+            'dashboard_metric_net_profit', icon=':material/monitoring:')
+    with primary_metrics[3]:
+        _dashboard_sales_detail_card(
+            'Ticket promedio',
+            _mxn(float(summary.acquired_money.amount)
+                 / max(1, today_summary['sale_quantity'])),
+            'Abre los tickets que explican el promedio de la jornada.',
+            'dashboard_metric_average_ticket')
+    secondary_metrics = st.columns(3)
+    with secondary_metrics[0]:
+        _dashboard_metric_card(
+            'Gastos de hoy', _mxn(summary.total_expense.amount), 'Gastos',
+            'Abre gastos registrados para ver conceptos, fechas, importes y beneficiarios.',
+            'dashboard_metric_today_expenses', icon=':material/payments:')
+    with secondary_metrics[1]:
+        _dashboard_metric_card(
+            'Productos', str(product_quantity), 'Inventario',
+            'Abre inventario para consultar existencias, costos, precios y códigos.',
+            'dashboard_metric_products', icon=':material/inventory_2:')
+    if _is_administrator():
+        credit_summary = RepositoryFactory.get_credit_account_repository().summary()
+        with secondary_metrics[2]:
+            _dashboard_metric_card(
+                'Cartera por cobrar', _mxn(credit_summary['to_collect']),
+                'Créditos y cartera',
+                'Abre cuentas por cobrar/pagar con vencimientos, saldos y abonos.',
+                'dashboard_metric_credit_portfolio',
+                delta=f"{len(credit_summary['overdue'])} vencida(s)",
+                icon=':material/account_balance_wallet:')
+        cash = RepositoryFactory.get_cash_control_repository()
+        opening = cash.get_opening(mexico_today())
+        cash_metrics = st.columns(3)
+        with cash_metrics[0]:
+            _dashboard_metric_card(
+                'Utilidad bruta', _mxn(summary.total_profit.amount), 'Reportes',
+                'Abre el reporte financiero para revisar ventas, costos y utilidad bruta.',
+                'dashboard_metric_gross_profit', icon=':material/monitoring:')
+        with cash_metrics[1]:
+            _dashboard_metric_card(
+                'Seguimiento de caja',
+                f'Turno activo · {opening.shift_responsible}' if opening else 'Caja cerrada',
+                'Apertura de caja',
+                'Abre apertura de caja para ver turno, responsable, fondo y movimientos.',
+                'dashboard_metric_cash_tracking', icon=':material/lock_open:')
+        if opening:
+            grouped_sales = {}
+            for sale in today_summary['sales']:
+                if sale.status != 'Completada':
+                    continue
+                grouped_sales.setdefault(
+                    sale.transaction_id or f'legacy-{sale.id}', []).append(sale)
+            cash_sales = 0.0
+            for transaction in grouped_sales.values():
+                transaction_total = sum(float(sale.price.amount) for sale in transaction)
+                cash_sales += _payment_breakdown(
+                    transaction[0].payment_method, transaction[0].payment_details,
+                    transaction_total)['Efectivo']
+            movements = cash.totals_for_date(mexico_today(), opening.id)
+            estimated_cash = (float(opening.opening_amount.amount) + cash_sales
+                              + movements['Entrada'] - movements['Retiro'])
+            limit = float(opening.cash_limit.amount)
+            state = 'Dentro del límite' if estimated_cash <= limit else 'Sobre el límite'
+            with cash_metrics[2]:
+                _dashboard_metric_card(
+                    'Estado del dinero', _mxn(estimated_cash), 'Corte de caja',
+                    'Abre corte de caja para revisar efectivo estimado, movimientos y conciliación.',
+                    'dashboard_metric_cash_state', delta=state,
+                    delta_color='normal' if estimated_cash <= limit else 'inverse',
+                    icon=':material/point_of_sale:')
+        else:
+            with cash_metrics[2]:
+                _dashboard_metric_card(
+                    'Estado del dinero', 'Sin turno activo', 'Apertura de caja',
+                    'Abre apertura de caja para iniciar o revisar el turno.',
+                    'dashboard_metric_cash_state_closed', icon=':material/lock_open:')
+    quick_sale, tools = st.columns(2)
+    with quick_sale.container(border=True):
+        st.subheader('Caja rápida')
+        st.caption('Registra ventas y consulta el catálogo sin salir de la operación.')
+        if st.button('Nueva venta', type='primary', icon=':material/point_of_sale:', width='stretch', key='dashboard_quick_sale'):
+            _navigate_to_page('Ventas'); st.rerun()
+        if _is_administrator() and st.button('Administrar inventario', icon=':material/inventory_2:', width='stretch', key='dashboard_quick_inventory'):
+            _navigate_to_page('Inventario'); st.rerun()
+    with tools.container(border=True):
+        st.subheader('Herramientas de venta')
+        st.caption(f'{product_quantity} productos registrados en inventario')
+        actions = [('Venta rápida', 'Venta express'), ('Cotizaciones', 'Cotizaciones'),
+                   ('Canal de ventas', 'Mi página web'),
+                   ('Historial de ventas', 'Ventas')]
+        for label, target in actions:
+            if target in (ADMIN_PAGES if _is_administrator() else SELLER_PAGES):
+                if st.button(label, icon=':material/bolt:', width='stretch',
+                             key=f'dashboard_tool_{label}'):
+                    if label == 'Historial de ventas':
+                        _open_sales_history()
+                    else:
+                        _navigate_to_page(target)
+                    st.rerun()
+
+    with st.container(border=True):
+        st.subheader('Suite Puntos ECCOS')
+        st.caption(
+            'Módulos clave para competir con un POS moderno: operación, inventario, '
+            'cobranza, reportes y presencia digital.')
+        suite_modules = [
+            ('Ventas inteligentes', 'Ventas', ':material/point_of_sale:',
+             'Carrito, lector de código, pagos mixtos, vales, crédito y tickets térmicos.'),
+            ('Inventario rentable', 'Inventario', ':material/inventory_2:',
+             'Costos, márgenes, mayoreo, existencias mínimas, Excel y venta directa.'),
+            ('Caja y turnos', 'Corte de caja', ':material/lock:',
+             'Apertura, movimientos, denominaciones, cortes y conciliación.'),
+            ('Clientes y crédito', 'Créditos y cartera', ':material/account_balance_wallet:',
+             'Clientes registrados, cobranza, vencimientos, abonos y lealtad.'),
+            ('Reportes y crecimiento', 'Reportes', ':material/query_stats:',
+             'PDF, Excel, HTML, estadísticas y análisis por producto.'),
+        ]
+        with st.container(horizontal=True):
+            for title, target, icon, detail in suite_modules:
+                if target not in (ADMIN_PAGES if _is_administrator() else SELLER_PAGES):
+                    continue
+                with st.container(border=True):
+                    st.markdown(f'#### {icon} {title}')
+                    st.caption(detail)
+                    st.button(
+                        'Abrir módulo', icon=':material/arrow_forward:',
+                        width='stretch', key=f'dashboard_suite_{target}',
+                        on_click=_navigate_to_page, args=(target,))
 
     if _is_administrator():
         st.subheader('Alerta de inventario')
@@ -744,6 +1115,100 @@ def _render_dashboard():
                       if float(product.price.amount) > 0
                       and ((float(product.price.amount) - float(product.cost.amount))
                            / float(product.price.amount)) < .10]
+        cash_over_limit = bool(opening and estimated_cash > limit)
+        overdue_credit_count = len(credit_summary['overdue'])
+        health_penalties = (
+            min(25, len(out_of_stock) * 8)
+            + min(20, len(low_stock) * 4)
+            + min(20, len(low_margin) * 5)
+            + min(20, overdue_credit_count * 7)
+            + (15 if cash_over_limit else 0)
+        )
+        health_score = max(0, 100 - health_penalties)
+        if health_score >= 85:
+            health_label, health_tone = 'Negocio estable', 'success'
+        elif health_score >= 65:
+            health_label, health_tone = 'Requiere seguimiento', 'warning'
+        else:
+            health_label, health_tone = 'Atención prioritaria', 'error'
+        recommended_actions = []
+        if out_of_stock:
+            recommended_actions.append('Reabastecer productos agotados antes de nuevas ventas.')
+        if low_stock:
+            recommended_actions.append('Preparar lista de compra para existencias bajas.')
+        if overdue_credit_count:
+            recommended_actions.append('Contactar cuentas vencidas y registrar abonos.')
+        if cash_over_limit:
+            recommended_actions.append('Retirar excedente o cerrar corte para proteger efectivo.')
+        if low_margin:
+            recommended_actions.append('Revisar precios/costos de productos con margen bajo.')
+        if not recommended_actions:
+            recommended_actions.append('Mantener operación y revisar reportes al cierre.')
+        with st.container(border=True):
+            st.subheader('Salud operativa del negocio')
+            st.metric('Puntaje ECCOS', f'{health_score}/100', delta=health_label)
+            st.progress(health_score / 100)
+            getattr(st, health_tone)(
+                ' · '.join(recommended_actions[:2]),
+                icon=':material/health_and_safety:')
+            with st.expander('Ver plan de acción recomendado',
+                             icon=':material/checklist:'):
+                for action in recommended_actions:
+                    st.markdown(f'- {action}')
+        with st.container(border=True):
+            st.subheader('Atención operativa')
+            st.caption('Prioridades que requieren acción antes de cerrar la jornada.')
+            with st.container(horizontal=True):
+                _dashboard_metric_card(
+                    'Productos agotados', len(out_of_stock), 'Inventario',
+                    'Consulta los productos sin existencia y reabastécelos.',
+                    'dashboard_attention_out_of_stock',
+                    icon=':material/inventory_2:')
+                _dashboard_metric_card(
+                    'Existencias bajas', len(low_stock), 'Abastecimiento',
+                    'Abre la lista de compra sugerida para productos por agotarse.',
+                    'dashboard_attention_low_stock',
+                    icon=':material/local_shipping:')
+                _dashboard_metric_card(
+                    'Margen bajo', len(low_margin), 'Reportes',
+                    'Revisa productos con margen menor al 10 % antes de vender.',
+                    'dashboard_attention_low_margin',
+                    icon=':material/price_check:')
+                _dashboard_metric_card(
+                    'Cuentas vencidas', overdue_credit_count, 'Créditos y cartera',
+                    'Abre cobranza para revisar vencimientos y registrar abonos.',
+                    'dashboard_attention_overdue_credit',
+                    icon=':material/account_balance_wallet:')
+                _dashboard_metric_card(
+                    'Caja',
+                    'Sobre límite' if cash_over_limit else 'En control',
+                    'Apertura de caja' if cash_over_limit else 'Corte de caja',
+                    'Abre caja para revisar efectivo, límite y movimientos.',
+                    'dashboard_attention_cash',
+                    delta=_mxn(estimated_cash - limit) if cash_over_limit else None,
+                    delta_color='inverse' if cash_over_limit else 'normal',
+                    icon=':material/point_of_sale:')
+        incident_repository = RepositoryFactory.get_operations_repository()
+        if cash_over_limit:
+            incident_repository.ensure_incident(
+                'cash:over-limit', 'Caja', 'Efectivo sobre el límite',
+                f'La caja supera el límite por {_mxn(estimated_cash - limit)}.', 'Crítica')
+        if out_of_stock:
+            incident_repository.ensure_incident(
+                'inventory:out-of-stock', 'Inventario', 'Productos agotados',
+                f'{len(out_of_stock)} producto(s) requieren reabastecimiento.', 'Crítica')
+        if low_stock:
+            incident_repository.ensure_incident(
+                'inventory:low-stock', 'Inventario', 'Existencias bajas',
+                f'{len(low_stock)} producto(s) llegaron a su mínimo.', 'Alta')
+        if low_margin:
+            incident_repository.ensure_incident(
+                'profitability:low-margin', 'Ventas', 'Productos con margen bajo',
+                f'{len(low_margin)} producto(s) tienen margen menor al 10 %.', 'Media')
+        if overdue_credit_count:
+            incident_repository.ensure_incident(
+                'credit:overdue', 'Créditos', 'Cuentas vencidas',
+                f'{overdue_credit_count} cuenta(s) requieren cobranza.', 'Crítica')
         if out_of_stock:
             st.error(f'{len(out_of_stock)} producto(s) agotado(s). Reabastece el inventario.',
                      icon=':material/error:')
@@ -797,6 +1262,50 @@ def _render_dashboard():
 # Ventas
 # ---------------------------------------------------------------------------
 
+def _render_seller_dashboard():
+    _hero('Mi jornada', 'Ventas, turno y actividad personal de hoy.', 'VENDEDOR · OPERACIÓN')
+    actor = _actor_name()
+    sales = [sale for sale in RepositoryFactory.get_sale_repository().get_all_sales()
+             if sale.date == mexico_today() and sale.cashier == actor
+             and sale.status == 'Completada']
+    transaction_ids = {sale.transaction_id or f'sale-{sale.id}' for sale in sales}
+    revenue = sum(float(sale.price.amount) for sale in sales)
+    profit = sum(float(sale.profit.amount) for sale in sales if sale.profit is not None)
+    metrics = st.columns(5)
+    metrics[0].metric('Mis ventas', _mxn(revenue))
+    metrics[1].metric('Tickets', len(transaction_ids))
+    metrics[2].metric('Artículos', len(sales))
+    metrics[3].metric('Ticket promedio', _mxn(revenue / max(1, len(transaction_ids))))
+    commission_rate = float(getattr(st.session_state['user'], 'commission_bps', 0) or 0) / 10000
+    metrics[4].metric('Comisión estimada', _mxn(revenue * commission_rate),
+                      delta=f'{commission_rate * 100:g}%')
+    opening = RepositoryFactory.get_cash_control_repository().get_opening(mexico_today())
+    if opening:
+        st.success(
+            f'Turno activo · responsable: {opening.shift_responsible} · '
+            f'fondo inicial: {_mxn(opening.opening_amount.amount)}',
+            icon=':material/lock_open:')
+    else:
+        st.warning('No hay una caja abierta para la jornada actual.', icon=':material/lock:')
+    actions = st.columns(3)
+    actions[0].button('Nueva venta', type='primary', icon=':material/point_of_sale:',
+                      width='stretch', on_click=_navigate_to_page, args=('Nueva venta',))
+    actions[1].button('Venta express', icon=':material/bolt:', width='stretch',
+                      on_click=_navigate_to_page, args=('Venta express',))
+    actions[2].button('Cotizaciones', icon=':material/request_quote:', width='stretch',
+                      on_click=_navigate_to_page, args=('Cotizaciones',))
+    st.subheader('Actividad reciente')
+    if sales:
+        recent = sorted(sales, key=lambda sale: sale.created_at or datetime.min, reverse=True)[:30]
+        st.dataframe(pd.DataFrame([{
+            'Hora': sale.created_at, 'Producto': sale.product_name,
+            'Importe': float(sale.price.amount), 'Método': sale.payment_method,
+            'Cliente': sale.customer,
+        } for sale in recent]), hide_index=True, width='stretch',
+            column_config={'Importe': st.column_config.NumberColumn(format='$ %.2f MXN')})
+    else:
+        st.info('Aún no has registrado ventas en esta jornada.')
+
 def _payment_breakdown(payment_method, payment_details, total):
     """Distribuye un cobro entre métodos para reportes y cortes de caja."""
     amount = max(0.0, float(total))
@@ -837,6 +1346,84 @@ def _payment_breakdown(payment_method, payment_details, total):
     return breakdown
 
 
+def _credit_customer_controls(prefix):
+    """Selecciona un cliente activo o permite darlo de alta antes del crédito."""
+    operations = RepositoryFactory.get_operations_repository()
+    customers = operations.get_customers()
+    labels = {
+        f'{customer.name} · {customer.phone or "sin teléfono"}': customer
+        for customer in customers
+    }
+    customers_by_name = {customer.name.casefold(): customer for customer in customers}
+    selected = st.selectbox(
+        'Cliente a crédito',
+        options=list(labels),
+        index=None,
+        accept_new_options=True,
+        placeholder='Busca por nombre o escribe uno nuevo',
+        help='El crédito sólo puede registrarse a un cliente del directorio.',
+        key=f'{prefix}_credit_customer_select',
+        width='stretch',
+    )
+    if selected is None:
+        return None, 'Selecciona un cliente registrado o da de alta uno nuevo.'
+
+    selected_text = str(selected).strip()
+    customer = labels.get(selected_text) or customers_by_name.get(selected_text.casefold())
+    if customer is not None:
+        st.caption(
+            f'Cliente registrado · Tel: {customer.phone or "sin teléfono"} · '
+            f'Correo: {customer.email or "sin correo"}')
+        return customer, ''
+
+    if selected_text.casefold() in ('público general', 'publico general'):
+        return None, 'Público general no puede usarse en ventas a crédito.'
+
+    st.info(
+        'Ese cliente aún no está registrado. Captura sus datos para poder venderle a crédito.',
+        icon=':material/person_add:')
+    with st.container(border=True):
+        st.markdown('#### Alta rápida de cliente')
+        contact_columns = st.columns(2)
+        phone = contact_columns[0].text_input(
+            'Teléfono *', key=f'{prefix}_new_credit_customer_phone',
+            placeholder='Número de contacto')
+        email = contact_columns[1].text_input(
+            'Correo electrónico', key=f'{prefix}_new_credit_customer_email',
+            placeholder='Opcional')
+        tax_id = st.text_input(
+            'RFC o identificación fiscal', key=f'{prefix}_new_credit_customer_tax_id',
+            placeholder='Opcional')
+        notes = st.text_area(
+            'Notas del cliente', key=f'{prefix}_new_credit_customer_notes',
+            placeholder='Dirección, referencia, límite acordado u observación',
+            height=72)
+        if st.button(
+                'Registrar cliente y usarlo', type='primary',
+                icon=':material/person_add:', width='stretch',
+                key=f'{prefix}_create_credit_customer'):
+            if len(selected_text) < 2:
+                st.error('Escribe el nombre completo del cliente.', icon=':material/error:')
+            elif not phone.strip():
+                st.error('Captura al menos un teléfono para crédito.', icon=':material/error:')
+            else:
+                try:
+                    customer = operations.add_customer(
+                        selected_text, phone, email, tax_id,
+                        f'Alta rápida desde venta a crédito. {notes}'.strip())
+                    operations.audit(
+                        'cliente_creado_credito', _actor_name(), 'customer',
+                        customer.id, customer.name)
+                    _queue_activity_notice(
+                        'Cliente registrado',
+                        f'“{customer.name}” quedó listo para ventas a crédito.',
+                        icon=':material/person_add:')
+                    st.rerun()
+                except Exception as error:
+                    st.error(str(error), icon=':material/error:')
+    return None, 'Registra el cliente antes de confirmar la venta a crédito.'
+
+
 def _payment_controls(prefix, total):
     """Controles de cobro reutilizables y datos seguros para auditoría."""
     method = st.segmented_control(
@@ -864,6 +1451,37 @@ def _payment_controls(prefix, total):
         details.extend([f'Tarjeta: {card_type}', f'Terminación: {last_four}'])
         if authorization:
             details.append(f'Autorización: {authorization}')
+    elif method == 'Crédito':
+        st.caption('La venta quedará registrada y se creará una cuenta por cobrar en Créditos y cartera.')
+        credit_columns = st.columns(2)
+        with credit_columns[0]:
+            customer, customer_error = _credit_customer_controls(prefix)
+        with credit_columns[1]:
+            due_date = st.date_input(
+                'Fecha de vencimiento', min_value=mexico_today(),
+                key=f'{prefix}_credit_due_date')
+        down_payment = st.number_input(
+            'Enganche en efectivo (MXN)', min_value=0.0,
+            max_value=max(0.0, float(total) - .01), step=10.0,
+            format='%.2f', key=f'{prefix}_credit_down_payment')
+        balance = float(total) - float(down_payment)
+        st.metric('Saldo por cobrar', _mxn(balance))
+        if customer_error:
+            validation_error = customer_error
+        elif balance <= 0:
+            validation_error = 'El crédito debe conservar un saldo pendiente.'
+        st.session_state[f'{prefix}_credit_data'] = {
+            'customer': customer.name if customer else '',
+            'customer_id': customer.id if customer else None,
+            'due_date': due_date,
+            'down_payment': float(down_payment),
+            'balance': balance,
+        }
+        details.extend([
+            f'Cliente crédito: {customer.name if customer else ""}',
+            f'Vence: {due_date:%d/%m/%Y}',
+            f'Enganche: {_mxn(down_payment)}', f'Saldo: {_mxn(balance)}',
+        ])
     elif method == 'Transferencia':
         transfer_columns = st.columns(2)
         bank = transfer_columns[0].selectbox(
@@ -1058,10 +1676,25 @@ def _actor_name():
 def _set_cart_quantity(product_id, quantity, unit_price=None):
     quantity = int(quantity)
     st.session_state.pos_cart[product_id] = quantity
-    st.session_state[f'cart_qty_{product_id}'] = quantity
+    # El widget ya administra su propio valor durante este render. Escribirlo aquí
+    # después de instanciarlo provoca StreamlitAPIException.
+    widget_key = f'cart_qty_{product_id}'
+    if widget_key not in st.session_state:
+        st.session_state[widget_key] = quantity
     st.session_state.setdefault('pos_cart_prices', {})
     if unit_price is not None:
         st.session_state.pos_cart_prices[product_id] = float(unit_price)
+
+
+def _cart_unit_price(product, quantity):
+    base_price = st.session_state.pos_cart_prices.get(
+        product.id, float(product.price.amount))
+    minimum = int(getattr(product, 'wholesale_min_quantity', 0) or 0)
+    wholesale = getattr(product, 'wholesale_price', None)
+    wholesale_value = float(wholesale.amount) if wholesale is not None else 0.0
+    if minimum > 0 and int(quantity) >= minimum and 0 < wholesale_value < base_price:
+        return wholesale_value
+    return base_price
 
 
 def _remove_from_cart(product_id):
@@ -1075,6 +1708,21 @@ def _clear_cart():
         st.session_state.pop(f'cart_qty_{product_id}', None)
     st.session_state.pos_cart = {}
     st.session_state.pos_cart_prices = {}
+
+
+def _open_product_in_sales(product_id, unit_price):
+    """Manda un producto seleccionado desde Inventario directo al carrito web."""
+    st.session_state.setdefault('pos_cart', {})
+    st.session_state.setdefault('pos_cart_prices', {})
+    current_quantity = int(st.session_state.pos_cart.get(product_id, 0))
+    _set_cart_quantity(product_id, max(1, current_quantity + 1), unit_price)
+    _navigate_to_page('Ventas' if _is_administrator() else 'Nueva venta')
+
+
+def _open_product_report(product_id):
+    """Abre Reportes con un producto preseleccionado para drill-down comercial."""
+    st.session_state['report_prefill_product_ids'] = [product_id]
+    _navigate_to_page('Reportes')
 
 
 def _render_voucher_history(prefix, expanded=False):
@@ -1285,9 +1933,9 @@ def _render_sales():
             st.warning('No encontramos productos con esa búsqueda.', icon=':material/search_off:')
         else:
             product_grid = st.container(height=520, border=False, key='product_grid')
-            for row_start in range(0, len(filtered), 3):
-                card_columns = product_grid.columns(3, gap='small')
-                for column, product in zip(card_columns, filtered[row_start:row_start + 3]):
+            for row_start in range(0, len(filtered), 2):
+                card_columns = product_grid.columns(2, gap='xsmall', wrap=False)
+                for column, product in zip(card_columns, filtered[row_start:row_start + 2]):
                     with column:
                         with st.container(border=False, key=f'product_card_{product.id}'):
                             in_cart = st.session_state.pos_cart.get(product.id, 0)
@@ -1342,22 +1990,33 @@ def _render_sales():
                 st.button('Cobrar', disabled=True, width='stretch', icon=':material/payments:')
             else:
                 total = sum(
-                    st.session_state.pos_cart_prices.get(
-                        product_id, float(product_by_id[product_id].price.amount)
-                    ) * current_quantity
+                    _cart_unit_price(product_by_id[product_id], current_quantity)
+                    * current_quantity
                     for product_id, current_quantity in cart.items()
                 )
+                discount_percent = 0.0
+                if _is_administrator():
+                    discount_percent = st.number_input(
+                        'Descuento de la operación (%)', min_value=0.0, max_value=99.0,
+                        step=1.0, key=f'checkout_discount_{checkout_version}',
+                        help='Se aplica proporcionalmente a cada línea y queda registrado en la auditoría.')
+                discount_factor = 1 - (discount_percent / 100)
+                subtotal_before_discount = total
+                total = sum(
+                    round(_cart_unit_price(product_by_id[product_id], quantity)
+                          * discount_factor, 2) * quantity
+                    for product_id, quantity in cart.items())
+                # El mosaico mantiene el total y los controles de cobro visibles.
+                # Al superar su altura, sólo se desplazan los productos del carrito.
                 cart_items = st.container(
-                    height=440 if distinct_count > 4 else 'content',
-                    border=False, key='cart_item_list', gap='xsmall')
+                    height=300, border=False, key='cart_item_list', gap='xsmall')
                 cart_entries = list(cart.items())
                 for row_start in range(0, distinct_count, 2):
                     tile_columns = cart_items.columns(2, gap='xsmall')
                     for tile_column, (product_id, current_quantity) in zip(
                             tile_columns, cart_entries[row_start:row_start + 2]):
                         product = product_by_id[product_id]
-                        unit_price = st.session_state.pos_cart_prices.get(
-                            product_id, float(product.price.amount))
+                        unit_price = _cart_unit_price(product, current_quantity)
                         line_total = unit_price * current_quantity
                         with tile_column.container(
                                 border=False, key=f'cart_tile_{product_id}'):
@@ -1369,7 +2028,7 @@ def _render_sales():
                                 f'<small>{_mxn(unit_price)} c/u</small></div>',
                                 unsafe_allow_html=True)
                             quantity_column, remove_column = st.columns(
-                                (1, .38), vertical_alignment='center')
+                                (1, .38), gap='xsmall', vertical_alignment='center')
                             quantity_key = f'cart_qty_{product_id}'
                             if quantity_key not in st.session_state:
                                 st.session_state[quantity_key] = current_quantity
@@ -1390,6 +2049,8 @@ def _render_sales():
                     f'<div class="pos-total"><small>TOTAL A COBRAR</small>'
                     f'<strong>{_mxn(total)}</strong></div>', unsafe_allow_html=True,
                 )
+                if discount_percent:
+                    st.caption(f'Descuento aplicado: {_mxn(subtotal_before_discount - total)} ({discount_percent:g}%).')
                 customers = RepositoryFactory.get_operations_repository().get_customers()
                 customer_options = ['Público general'] + [customer.name for customer in customers]
                 sale_customer = st.selectbox(
@@ -1426,9 +2087,8 @@ def _render_sales():
                     label = f'Espera {mexico_now():%H:%M} · {item_count} artículos'
                     RepositoryFactory.get_operations_repository().hold_sale(
                         label, '', _actor_name(), cart, {
-                            product_id: st.session_state.pos_cart_prices.get(
-                                product_id, float(product_by_id[product_id].price.amount))
-                            for product_id in cart
+                            product_id: _cart_unit_price(product_by_id[product_id], quantity)
+                            for product_id, quantity in cart.items()
                         })
                     _clear_cart()
                     _queue_activity_notice(
@@ -1444,17 +2104,25 @@ def _render_sales():
                         return
                     try:
                         sale_repository = RepositoryFactory.get_sale_repository()
+                        credit_customer = (
+                            st.session_state.get(
+                                f'checkout_{checkout_version}_credit_data', {})
+                            .get('customer', ''))
+                        recorded_customer = (credit_customer if payment_method == 'Crédito'
+                                             else sale_customer)
+                        active_register = _active_cash_register()
                         transaction_entries = []
                         for product_id, quantity in cart.items():
                             product = product_by_id[product_id]
-                            unit_price = st.session_state.pos_cart_prices.get(
-                                product_id, float(product.price.amount))
+                            unit_price = _cart_unit_price(product, quantity) * discount_factor
                             sale = Sale(
                                 product_id=product.id, product_name=product.name,
                                 price=CUPMoney(f'{unit_price:.2f}'), cost=product.cost,
                                 date=sale_date, payment_method=payment_method or 'Efectivo',
                                 payment_details=payment_details, cashier=_actor_name(),
-                                customer=sale_customer,
+                                customer=recorded_customer,
+                                register_id=active_register.id,
+                                register_name=active_register.name,
                             )
                             transaction_entries.append((sale, int(quantity)))
                         voucher_code = (st.session_state.get(
@@ -1463,12 +2131,51 @@ def _render_sales():
                         voucher_applied = (st.session_state.get(
                             f'checkout_{checkout_version}_voucher_applied', 0.0)
                             if voucher_code else 0.0)
+                        credit_payload = None
+                        if payment_method == 'Crédito':
+                            credit_data = st.session_state.get(
+                                f'checkout_{checkout_version}_credit_data', {})
+                            credit_payload = {
+                                'customer': credit_data.get('customer', ''),
+                                'due_date': credit_data.get('due_date'),
+                                'down_payment': credit_data.get('down_payment', 0),
+                                'total': total,
+                            }
                         inserted = sale_repository.insert_transaction(
-                            transaction_entries, voucher_code, voucher_applied, _actor_name())
-                        RepositoryFactory.get_operations_repository().audit(
-                            'venta_registrada', _actor_name(), 'sale', inserted[0].transaction_id,
-                            f'{item_count} artículos · {_mxn(total)} · {payment_method}')
-                        replacement_status = ''
+                            transaction_entries, voucher_code, voucher_applied, _actor_name(),
+                            credit_account=credit_payload)
+                        credit_status = ''
+                        if payment_method == 'Crédito':
+                            credit_account = credit_payload['account']
+                            credit_status = (
+                                f' Crédito #{credit_account.id}: saldo '
+                                f'{_mxn(credit_account.balance.amount)}.')
+                        loyalty_status = ''
+                        try:
+                            earned_points = (RepositoryFactory.get_operations_repository()
+                                             .record_customer_purchase(
+                                                 recorded_customer, total,
+                                                 inserted[0].transaction_id, _actor_name()))
+                            if earned_points:
+                                loyalty_status = f' Cliente sumó {earned_points} punto(s).'
+                        except Exception as loyalty_error:
+                            # La venta ya fue confirmada por su repositorio. Un problema
+                            # secundario de fidelización no debe presentarla como fallida
+                            # ni provocar que el cajero intente cobrarla nuevamente.
+                            loyalty_status = (
+                                ' La venta quedó guardada, pero no se actualizaron los '
+                                f'puntos del cliente: {loyalty_error}')
+                        try:
+                            RepositoryFactory.get_operations_repository().audit(
+                                'venta_registrada', _actor_name(), 'sale',
+                                inserted[0].transaction_id,
+                                f'{item_count} artículos · {_mxn(total)} · '
+                                f'{payment_method} · descuento {discount_percent:g}%')
+                        except Exception as audit_error:
+                            loyalty_status += (
+                                ' No se pudo añadir la venta a la bitácora: '
+                                f'{audit_error}')
+                        replacement_status = credit_status + loyalty_status
                         try:
                             replacement_voucher = (
                                 RepositoryFactory.get_store_credit_repository()
@@ -1476,19 +2183,19 @@ def _render_sales():
                                 if voucher_code else None)
                         except Exception as lookup_error:
                             replacement_voucher = None
-                            replacement_status = (
+                            replacement_status += (
                                 ' Venta guardada; no se pudo consultar el nuevo vale: '
                                 f'{lookup_error}')
                         if replacement_voucher is not None:
                             try:
                                 replacement_printer = _print_replacement_voucher(
                                     replacement_voucher, checkout_print_width)
-                                replacement_status = (
+                                replacement_status += (
                                     f' Nuevo vale {replacement_voucher.code} por '
                                     f'{_mxn(replacement_voucher.balance.amount)} impreso en '
                                     f'{replacement_printer}.')
                             except Exception as replacement_error:
-                                replacement_status = (
+                                replacement_status += (
                                     f' El nuevo vale {replacement_voucher.code} por '
                                     f'{_mxn(replacement_voucher.balance.amount)} fue creado, pero '
                                     f'no pudo imprimirse: {replacement_error}')
@@ -1502,9 +2209,9 @@ def _render_sales():
                             thermal_items = tuple({
                                 'name': product_by_id[product_id].name,
                                 'quantity': int(quantity),
-                                'unit_price': st.session_state.pos_cart_prices.get(
-                                    product_id,
-                                    float(product_by_id[product_id].price.amount)),
+                                'unit_price': round(
+                                    _cart_unit_price(product_by_id[product_id], quantity)
+                                    * discount_factor, 2),
                             } for product_id, quantity in cart.items())
                             try:
                                 printer = _print_thermal_ticket(
@@ -1531,7 +2238,10 @@ def _render_sales():
                     except Exception as error:
                         st.error(f'No se pudo completar la venta: {error}')
 
-        with st.expander('Movimientos recientes', icon=':material/receipt_long:'):
+        history_opened_from_dashboard = st.session_state.pop('sales_history_open', False)
+        with st.expander(
+                'Movimientos recientes', icon=':material/receipt_long:',
+                expanded=history_opened_from_dashboard):
             history_limit = st.selectbox(
                 'Mostrar operaciones', (8, 20, 50), key='sales_history_limit')
             recent_sales = sorted(
@@ -1786,7 +2496,7 @@ def _render_inventory_downloads(products, key_prefix, include_cost):
     sections = [('Resumen', summary), ('Inventario', rows)]
     business = _business_export_data()
     subtitle = f'Inventario actualizado al {mexico_today()}'
-    columns = st.columns(2)
+    columns = st.columns(3)
     columns[0].download_button(
         'Descargar inventario PDF',
         generate_pdf_bytes(business, 'Reporte de inventario', subtitle, sections),
@@ -1799,6 +2509,12 @@ def _render_inventory_downloads(products, key_prefix, include_cost):
         f'inventario-{mexico_today()}.xlsx',
         'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
         key=f'{key_prefix}_inventory_excel', icon=':material/table_view:',
+        width='stretch')
+    columns[2].download_button(
+        'Descargar inventario HTML',
+        generate_html_bytes(business, 'Reporte de inventario', subtitle, sections),
+        f'inventario-{mexico_today()}.html', 'text/html',
+        key=f'{key_prefix}_inventory_html', icon=':material/language:',
         width='stretch')
 
 
@@ -1839,7 +2555,12 @@ def _render_inventory():
                 help='Reutiliza un proveedor registrado o escribe uno nuevo.',
                 key=f'add_product_supplier_{inventory_form_version}')
             minimum_stock = st.number_input('Existencia mínima', min_value=0, value=5, step=1)
-            st.caption('Los campos marcados con * son obligatorios.')
+            wholesale_columns = st.columns(2)
+            wholesale_min = wholesale_columns[0].number_input(
+                'Mayoreo desde (unidades)', min_value=0, value=0, step=1)
+            wholesale_price = wholesale_columns[1].number_input(
+                'Precio de mayoreo', min_value=0.0, value=0.0, step=1.0, format='%.2f')
+            st.caption('Los campos marcados con * son obligatorios. Usa cero para desactivar mayoreo.')
             submitted = st.form_submit_button(
                 'Guardar producto', type='primary', icon=':material/save:')
         if submitted:
@@ -1863,12 +2584,17 @@ def _render_inventory():
                     f'{", ".join(missing_fields)}.',
                          icon=':material/error:')
                 return
+            if int(wholesale_min) > 0 and not (0 < float(wholesale_price) < float(price)):
+                st.error('El precio de mayoreo debe ser mayor que cero y menor al precio normal.')
+                return
             try:
                 product = Product(name=clean_name, description=clean_description,
                                   price=CUPMoney(f'{price:.2f}'), cost=CUPMoney(f'{cost:.2f}'),
                                   quantity=int(quantity), barcode=barcode.strip(),
                                   category=clean_category, supplier=clean_supplier,
-                                  minimum_stock=int(minimum_stock))
+                                  minimum_stock=int(minimum_stock),
+                                  wholesale_min_quantity=int(wholesale_min),
+                                  wholesale_price=CUPMoney(f'{wholesale_price:.2f}'))
                 RepositoryFactory.get_product_repository().insert_product(product)
                 RepositoryFactory.get_operations_repository().audit(
                     'producto_creado', _actor_name(), 'product', product.id,
@@ -1895,6 +2621,81 @@ def _render_inventory():
         'Proveedor': p.supplier or '', 'Código de barras': p.barcode or '',
     } for p in products]), width='stretch', hide_index=True)
     _render_inventory_downloads(products, 'admin', include_cost=True)
+
+    with st.expander('Inteligencia de producto y venta directa', expanded=False,
+                     icon=':material/query_stats:'):
+        product_labels = {
+            f'{product.name} · {product.quantity} disp. · {_mxn(product.price.amount)}': product
+            for product in products
+        }
+        selected_label = st.selectbox(
+            'Producto a analizar', list(product_labels), index=None,
+            placeholder='Elige un producto para ver ventas, margen y movimientos',
+            key='inventory_product_intelligence_select')
+        if selected_label is None:
+            st.caption('Selecciona un producto para abrir su ficha comercial y operativa.')
+        else:
+            selected_product = product_labels[selected_label]
+            sale_filter = SaleFilter()
+            sale_filter.product_id_list = [selected_product.id]
+            product_sales = RepositoryFactory.get_sale_repository().get_sales_by_filter(sale_filter)
+            completed_sales = [sale for sale in product_sales if sale.status == 'Completada']
+            total_sold = len(completed_sales)
+            total_revenue = sum(float(sale.price.amount) for sale in completed_sales)
+            total_profit = sum(float(sale.profit.amount) for sale in completed_sales
+                               if sale.profit is not None)
+            margin = (float(selected_product.price.amount) - float(selected_product.cost.amount))
+            margin_rate = margin / max(.01, float(selected_product.price.amount))
+            last_sale = max((sale.date for sale in completed_sales), default=None)
+            with st.container(horizontal=True):
+                st.metric('Existencia', f'{selected_product.quantity} unidades', border=True)
+                st.metric('Vendidas históricas', total_sold, border=True)
+                st.metric('Ingresos generados', _mxn(total_revenue), border=True)
+                st.metric('Utilidad generada', _mxn(total_profit), border=True)
+                st.metric('Margen actual', f'{margin_rate:.1%}',
+                          delta=_mxn(margin), border=True)
+            st.caption(
+                f'Última venta: {last_sale or "sin ventas registradas"} · '
+                f'Código: {selected_product.barcode or "sin código"} · '
+                f'Proveedor: {selected_product.supplier or "sin proveedor"}')
+            action_columns = st.columns(3)
+            action_columns[0].button(
+                'Vender este producto', type='primary',
+                icon=':material/add_shopping_cart:', width='stretch',
+                disabled=selected_product.quantity <= 0,
+                key=f'inventory_sell_product_{selected_product.id}',
+                on_click=_open_product_in_sales,
+                args=(selected_product.id, float(selected_product.price.amount)))
+            action_columns[1].button(
+                'Reabastecer o ajustar', icon=':material/sync_alt:', width='stretch',
+                key=f'inventory_move_product_{selected_product.id}',
+                on_click=_navigate_to_page, args=('Movimientos',))
+            action_columns[2].button(
+                'Ver reporte filtrado', icon=':material/monitoring:', width='stretch',
+                key=f'inventory_report_product_{selected_product.id}',
+                on_click=_open_product_report, args=(selected_product.id,))
+            if completed_sales:
+                recent_sales = sorted(
+                    completed_sales,
+                    key=lambda sale: (sale.created_at or datetime.min, sale.id),
+                    reverse=True)[:20]
+                st.dataframe(pd.DataFrame([{
+                    'Folio': _sale_folio(sale.id),
+                    'Fecha': sale.date,
+                    'Precio': float(sale.price.amount),
+                    'Costo': float(sale.cost.amount),
+                    'Utilidad': float(sale.profit.amount) if sale.profit is not None else 0.0,
+                    'Método': sale.payment_method or '',
+                    'Cliente': sale.customer or 'Público general',
+                    'Responsable': sale.cashier or '',
+                } for sale in recent_sales]), hide_index=True, width='stretch',
+                    column_config={
+                        'Precio': st.column_config.NumberColumn(format='$ %.2f MXN'),
+                        'Costo': st.column_config.NumberColumn(format='$ %.2f MXN'),
+                        'Utilidad': st.column_config.NumberColumn(format='$ %.2f MXN'),
+                    })
+            else:
+                st.info('Este producto todavía no tiene ventas completadas.')
 
     with st.expander('Editar o dar de baja un producto'):
         inventory_admin_version = _form_version('inventory_admin')
@@ -1938,6 +2739,13 @@ def _render_inventory():
                 key=f'edit_product_supplier_{product.id}')
             minimum_stock = st.number_input('Existencia mínima', min_value=0, step=1,
                                             value=product.minimum_stock or 0)
+            wholesale_columns = st.columns(2)
+            wholesale_min = wholesale_columns[0].number_input(
+                'Mayoreo desde (unidades)', min_value=0, step=1,
+                value=product.wholesale_min_quantity or 0)
+            wholesale_price = wholesale_columns[1].number_input(
+                'Precio de mayoreo', min_value=0.0, step=1.0, format='%.2f',
+                value=float(product.wholesale_price.amount))
             save_submitted = st.form_submit_button('Guardar cambios')
         if save_submitted:
             clean_category = canonical_inventory_value(category, category_options)
@@ -1946,12 +2754,17 @@ def _render_inventory():
                 st.error('Completa los campos obligatorios: nombre, descripción y categoría.',
                          icon=':material/error:')
                 return
+            if int(wholesale_min) > 0 and not (0 < float(wholesale_price) < float(price)):
+                st.error('El precio de mayoreo debe ser mayor que cero y menor al precio normal.')
+                return
             try:
                 updated = Product(id=product.id, name=name.strip(), description=description.strip(),
                                   price=CUPMoney(f'{price:.2f}'), cost=CUPMoney(f'{cost:.2f}'),
                                   quantity=product.quantity, barcode=barcode.strip(),
                                   category=clean_category, supplier=clean_supplier,
-                                  minimum_stock=int(minimum_stock), is_active=True)
+                                  minimum_stock=int(minimum_stock), is_active=True,
+                                  wholesale_min_quantity=int(wholesale_min),
+                                  wholesale_price=CUPMoney(f'{wholesale_price:.2f}'))
                 RepositoryFactory.get_product_repository().update_product(updated)
                 RepositoryFactory.get_operations_repository().audit(
                     'producto_editado', _actor_name(), 'product', product.id, name.strip())
@@ -2528,18 +3341,41 @@ def _render_express_sale():
                 quantity=int(quantity) + (int(remaining_stock) if add_to_inventory else 0),
                 barcode='', is_temporary=not add_to_inventory)
             RepositoryFactory.get_product_repository().insert_product(product)
+            credit_customer = (st.session_state.get(
+                f'express_{express_version}_credit_data', {}).get('customer', ''))
+            active_register = _active_cash_register()
             sale = Sale(product_id=product.id, price=product.price, cost=product.cost,
                         date=mexico_today(), payment_method=payment_method or 'Efectivo',
-                        payment_details=payment_details)
+                        payment_details=payment_details,
+                        register_id=active_register.id,
+                        register_name=active_register.name,
+                        customer=credit_customer if payment_method == 'Crédito' else '')
             voucher_code = (st.session_state.get(
                 f'express_{express_version}_voucher_code', '')
                 if payment_method.startswith('Vale') else '')
             voucher_applied = (st.session_state.get(
                 f'express_{express_version}_voucher_applied', 0.0)
                 if voucher_code else 0.0)
-            inserted_sales = RepositoryFactory.get_sale_repository().insert_sales(
-                sale, int(quantity), voucher_code, voucher_applied, _actor_name())
+            credit_payload = None
+            if payment_method == 'Crédito':
+                credit_data = st.session_state.get(
+                    f'express_{express_version}_credit_data', {})
+                credit_payload = {
+                    'customer': credit_data.get('customer', ''),
+                    'due_date': credit_data.get('due_date'),
+                    'down_payment': credit_data.get('down_payment', 0),
+                    'total': total,
+                }
+            inserted_sales = RepositoryFactory.get_sale_repository().insert_transaction(
+                [(sale, int(quantity))], voucher_code, voucher_applied, _actor_name(),
+                credit_account=credit_payload)
             first_sale = inserted_sales[0]
+            credit_status = ''
+            if payment_method == 'Crédito':
+                credit_account = credit_payload['account']
+                credit_status = (
+                    f' Crédito #{credit_account.id}: saldo '
+                    f'{_mxn(credit_account.balance.amount)}.')
             st.session_state.express_last_ticket = {
                 'folio': _sale_folio(first_sale.id),
                 'created_at': mexico_now().strftime('%d/%m/%Y %H:%M'),
@@ -2558,7 +3394,7 @@ def _render_express_sale():
                 first_sale.transaction_id or first_sale.id,
                 f'{clean_name} · {int(quantity)} artículo(s) · {_mxn(total)} · '
                 f'{payment_method or "Efectivo"}')
-            replacement_status = ''
+            replacement_status = credit_status
             try:
                 replacement_voucher = (
                     RepositoryFactory.get_store_credit_repository()
@@ -2595,7 +3431,7 @@ def _render_express_sale():
                         st.session_state.express_last_ticket['created_at'], ({
                             'name': clean_name, 'quantity': int(quantity),
                             'unit_price': float(unit_price),
-                        },), payment_method or 'Efectivo', payment_details, '',
+                        },), payment_method or 'Efectivo', payment_details, credit_customer,
                         express_checkout_width, 'TICKET DE VENTA EXPRÉS')
                     print_status = f' Ticket enviado a {printer}.'
                 except Exception as print_error:
@@ -3066,7 +3902,42 @@ def _render_expenses():
 # Reportes
 # ---------------------------------------------------------------------------
 
-def _summary_for_range(initial_date: date, final_date: date):
+def _active_cash_register():
+    repository = RepositoryFactory.get_cash_control_repository()
+    registers = repository.get_registers()
+    selected_id = st.session_state.get('active_cash_register_id')
+    selected = next((register for register in registers if register.id == selected_id), None)
+    if selected is None:
+        selected = registers[0] if registers else repository.ensure_default_register()
+        st.session_state['active_cash_register_id'] = selected.id
+    return selected
+
+
+def _render_cash_register_selector():
+    repository = RepositoryFactory.get_cash_control_repository()
+    registers = repository.get_registers()
+    if not registers:
+        registers = [repository.ensure_default_register()]
+    current_id = st.session_state.get('active_cash_register_id') or registers[0].id
+    index = next((idx for idx, register in enumerate(registers)
+                  if register.id == current_id), 0)
+    labels = {
+        f'{register.name} · {register.code}': register
+        for register in registers
+    }
+    selected_label = st.selectbox(
+        'Caja activa', list(labels), index=index,
+        key='active_cash_register_selector',
+        help='Las ventas, apertura y corte se registran en esta caja.')
+    selected = labels[selected_label]
+    st.session_state['active_cash_register_id'] = selected.id
+    st.session_state['active_cash_register_name'] = selected.name
+    return selected
+
+
+def _summary_for_range(initial_date: date, final_date: date,
+                       product_ids: list[int] | None = None,
+                       register_id: int | None = None):
     """Devuelve el resumen financiero y sus registros para un intervalo inclusivo.
 
     Se usa cuando la página también necesita el detalle de ventas y gastos. Las
@@ -3075,7 +3946,13 @@ def _summary_for_range(initial_date: date, final_date: date):
     sale_filter = SaleFilter()
     sale_filter.minimum_date = initial_date
     sale_filter.maximum_date = final_date
+    sale_filter.product_id_list = product_ids or None
     sales = RepositoryFactory.get_sale_repository().get_sales_by_filter(sale_filter)
+    if register_id is not None:
+        sales = [
+            sale for sale in sales
+            if getattr(sale, 'register_id', None) in (None, int(register_id))
+        ]
 
     expense_filter = ExpenseFilter()
     expense_filter.minimum_date = initial_date
@@ -3116,6 +3993,11 @@ def _cash_close_summary(close_date: date, opening=None, closed_at=None):
             return created_at >= start_at and (closed_at is None or created_at <= closed_at)
 
         sales = [sale for sale in result['sales'] if belongs_to_shift(sale)]
+        if getattr(opening, 'register_id', None) is not None:
+            sales = [
+                sale for sale in sales
+                if getattr(sale, 'register_id', None) in (None, opening.register_id)
+            ]
         expenses = [expense for expense in result['expenses'] if belongs_to_shift(expense)]
         acquired_money = economy.calculate_collected_money(sales)
         total_profit = economy.calculate_total_profit(sales)
@@ -3154,6 +4036,7 @@ def _cash_close_rows(cash_close):
     ) or 'Conteo manual'
     values = (
         ('Fecha', str(cash_close.date)),
+        ('Caja', cash_close.register_name or 'Caja principal'),
         ('Responsable', cash_close.cashier),
         ('Operaciones', cash_close.operation_count),
         ('Ventas totales', float(cash_close.total_sales.amount)),
@@ -3224,7 +4107,8 @@ def _render_cash_summary_cards(items):
 
 def _require_open_cash_for_sale():
     control_repository = RepositoryFactory.get_cash_control_repository()
-    opening = control_repository.get_opening(mexico_today())
+    active_register = _active_cash_register()
+    opening = control_repository.get_opening(mexico_today(), active_register.id)
     if opening is None:
         st.warning('La caja aún no está abierta. Ve a Apertura de caja antes de registrar ventas.',
                    icon=':material/lock:')
@@ -3242,8 +4126,46 @@ def _render_cash_opening():
     is_admin = _is_administrator()
     control_repository = RepositoryFactory.get_cash_control_repository()
     close_repository = RepositoryFactory.get_cash_close_repository()
-    opening = control_repository.get_opening(selected_date)
-    openings_today = control_repository.get_openings(selected_date)
+    active_register = _active_cash_register()
+    st.caption(f'Caja seleccionada: {active_register.name} · {active_register.code}')
+    if is_admin:
+        with st.expander('Administrar cajas', icon=':material/point_of_sale:'):
+            registers = control_repository.get_registers()
+            st.dataframe(pd.DataFrame([{
+                'Caja': register.name,
+                'Código': register.code,
+                'Ubicación': register.location,
+                'Estado': 'Activa' if register.is_active else 'Inactiva',
+            } for register in registers]), hide_index=True, width='stretch')
+            register_form_version = _form_version('cash_register_new')
+            with st.form(f'cash_register_create_form_{register_form_version}', enter_to_submit=False):
+                columns = st.columns(3)
+                register_name = columns[0].text_input('Nombre de nueva caja',
+                                                      placeholder='Caja 2')
+                register_code = columns[1].text_input('Código',
+                                                      placeholder='CAJA-2')
+                register_location = columns[2].text_input('Ubicación',
+                                                          placeholder='Mostrador')
+                create_register = st.form_submit_button(
+                    'Crear caja', type='primary', icon=':material/add:')
+            if create_register:
+                try:
+                    register = control_repository.create_register(
+                        register_name, register_code, register_location, user.role)
+                    st.session_state['active_cash_register_id'] = register.id
+                    RepositoryFactory.get_operations_repository().audit(
+                        'caja_registrada', _actor_name(), 'cash_register', register.id,
+                        f'{register.name} · {register.code}')
+                    _queue_activity_notice(
+                        'Caja creada',
+                        f'{register.name} quedó lista para aperturas, ventas y cortes.',
+                        icon=':material/point_of_sale:')
+                    _reset_form('cash_register_new')
+                    st.rerun()
+                except Exception as error:
+                    st.error(str(error), icon=':material/error:')
+    opening = control_repository.get_opening(selected_date, active_register.id)
+    openings_today = control_repository.get_openings(selected_date, active_register.id)
     existing_close = close_repository.get_for_opening(opening.id) if opening else None
     previous_close = close_repository.get_latest()
     result, payment_totals, _ = _cash_close_summary(selected_date, opening)
@@ -3335,7 +4257,9 @@ def _render_cash_opening():
                         opened_by=administrator, notes=opening_notes.strip(),
                         shift_responsible=shift_responsible.strip(),
                         denomination_details=json.dumps(denomination_details),
-                        source_close_id=source_close_id), user.role)
+                        source_close_id=source_close_id,
+                        register_id=active_register.id,
+                        register_name=active_register.name), user.role)
                     RepositoryFactory.get_operations_repository().audit(
                         'caja_abierta', administrator, 'cash_opening', selected_date,
                         f'Fondo {_mxn(opening_amount)} · cierre origen '
@@ -3429,7 +4353,9 @@ def _render_cash_opening():
                         control_repository.add_movement(CashMovement(
                             date=selected_date, movement_type=movement_type,
                             amount=CUPMoney(f'{float(movement_amount):.2f}'),
-                            reason=reason, authorized_by=administrator), user.role,
+                            reason=reason, authorized_by=administrator,
+                            register_id=active_register.id,
+                            register_name=active_register.name), user.role,
                             available_cash=max(0.0, estimated_cash))
                         RepositoryFactory.get_operations_repository().audit(
                             'movimiento_caja', administrator, 'cash_movement', selected_date,
@@ -3464,7 +4390,9 @@ def _render_cash_close():
     is_admin = _is_administrator()
     repository = RepositoryFactory.get_cash_close_repository()
     control_repository = RepositoryFactory.get_cash_control_repository()
-    opening = control_repository.get_opening(selected_date)
+    active_register = _active_cash_register()
+    st.caption(f'Caja seleccionada: {active_register.name} · {active_register.code}')
+    opening = control_repository.get_opening(selected_date, active_register.id)
     existing_close = repository.get_for_opening(opening.id) if opening else None
     result, payment_totals, operation_count = _cash_close_summary(selected_date, opening)
     total_sales = sum(payment_totals.values())
@@ -3690,6 +4618,8 @@ def _render_cash_close():
             else:
                 cash_close = CashClose(
                     date=selected_date, opening_id=opening.id,
+                    register_id=opening.register_id,
+                    register_name=opening.register_name,
                     cashier=responsible.strip(), operation_count=operation_count,
                     total_sales=CUPMoney(f'{total_sales:.2f}'),
                     cash_sales=CUPMoney(f"{payment_totals['Efectivo']:.2f}"),
@@ -3761,6 +4691,488 @@ def _render_cash_close():
                 width='stretch')
 
 
+def _render_cash_history():
+    _hero('Historial de turnos y cortes',
+          'Consulta cada apertura, su responsable, movimientos y cierre sin modificar la auditoría.',
+          'CAJA · HISTORIAL')
+    control_repository = RepositoryFactory.get_cash_control_repository()
+    close_repository = RepositoryFactory.get_cash_close_repository()
+    cash_registers = control_repository.get_registers(include_inactive=True)
+    register_options = {'Todas las cajas': None}
+    register_options.update({
+        f'{register.name} · {register.code}': register.id
+        for register in cash_registers
+    })
+    selected_register_label = st.selectbox(
+        'Filtrar por caja', list(register_options),
+        key='cash_history_register_filter')
+    selected_register_id = register_options[selected_register_label]
+    openings = control_repository.get_all_openings(selected_register_id)
+    closes = [
+        close for close in close_repository.get_all()
+        if selected_register_id is None or close.register_id == selected_register_id
+    ]
+    closes_by_opening = {close.opening_id: close for close in closes if close.opening_id is not None}
+
+    if not openings:
+        st.info('Todavía no hay turnos de caja registrados.', icon=':material/history:')
+        return
+
+    closed_count = sum(opening.id in closes_by_opening for opening in openings)
+    total_difference = sum(float(close.difference.amount) for close in closes)
+    cards = st.columns(3)
+    cards[0].metric('Turnos registrados', len(openings))
+    cards[1].metric('Turnos cerrados', closed_count)
+    cards[2].metric('Diferencia acumulada', _mxn(total_difference))
+
+    rows = []
+    for opening in openings:
+        close = closes_by_opening.get(opening.id)
+        difference = float(close.difference.amount) if close else None
+        rows.append({
+            'Turno': f'#{opening.id}', 'Fecha': opening.date,
+            'Caja': opening.register_name or 'Caja principal',
+            'Responsable': opening.shift_responsible,
+            'Abrió': opening.opened_by, 'Fondo inicial': float(opening.opening_amount.amount),
+            'Estado': 'Cerrado' if close else 'Abierto',
+            'Corte': f'#{close.id}' if close else 'Pendiente',
+            'Diferencia': difference,
+        })
+    st.dataframe(
+        pd.DataFrame(rows), hide_index=True, width='stretch',
+        column_config={
+            'Fondo inicial': st.column_config.NumberColumn(format='$ %.2f MXN'),
+            'Diferencia': st.column_config.NumberColumn(format='$ %.2f MXN'),
+        })
+
+    labels = {
+        f'Turno #{opening.id} · {opening.date} · {opening.shift_responsible}': opening
+        for opening in openings
+    }
+    selected_label = st.selectbox(
+        'Ver detalle del turno', list(labels), index=None,
+        placeholder='Selecciona un turno para ver su detalle')
+    if selected_label is None:
+        return
+
+    opening = labels[selected_label]
+    close = closes_by_opening.get(opening.id)
+    movements = control_repository.get_movements(opening.date, opening.id)
+    movement_totals = control_repository.totals_for_date(opening.date, opening.id)
+    st.subheader(f'Turno #{opening.id} · {opening.shift_responsible}')
+    _render_cash_summary_cards((
+        ('Fondo inicial', _mxn(opening.opening_amount.amount)),
+        ('Entradas', _mxn(movement_totals['Entrada'])),
+        ('Retiros', _mxn(movement_totals['Retiro'])),
+        ('Estado', 'Cerrado' if close else 'Abierto'),
+    ))
+    st.caption(
+        f'Apertura: {opening.created_at:%d/%m/%Y %H:%M} · Autorizó: {opening.opened_by} · '
+        f'{opening.notes or "Sin nota de apertura"}')
+    if movements:
+        st.markdown('##### Movimientos del turno')
+        st.dataframe(pd.DataFrame([{
+            'Hora': movement.created_at, 'Tipo': movement.movement_type,
+            'Importe': float(movement.amount.amount), 'Motivo': movement.reason,
+            'Autorizó': movement.authorized_by,
+        } for movement in movements]), hide_index=True, width='stretch',
+            column_config={'Importe': st.column_config.NumberColumn(format='$ %.2f MXN')})
+    if close is None:
+        st.info('Este turno continúa abierto y aún no tiene un corte registrado.',
+                icon=':material/lock_open:')
+        return
+
+    st.markdown('##### Corte asociado')
+    _render_cash_summary_cards((
+        ('Ventas', _mxn(close.total_sales.amount)),
+        ('Esperado', _mxn(close.expected_cash.amount)),
+        ('Contado', _mxn(close.counted_cash.amount)),
+        ('Diferencia', _mxn(close.difference.amount)),
+    ))
+    st.caption(f'Cerró: {close.cashier} · {close.created_at:%d/%m/%Y %H:%M} · '
+               f'{close.notes or "Sin observaciones"}')
+    detail_rows = _cash_close_rows(close)
+    business = _business_export_data()
+    download_columns = st.columns(2)
+    download_columns[0].download_button(
+        'Descargar PDF del corte',
+        generate_pdf_bytes(business, f'Corte de caja #{close.id}',
+                           f'Fecha: {close.date} · Responsable: {close.cashier}',
+                           [('Conciliación', detail_rows)]),
+        f'corte-caja-{close.date}-{close.id}.pdf', 'application/pdf',
+        key=f'cash_history_pdf_{close.id}', icon=':material/picture_as_pdf:', width='stretch')
+    download_columns[1].download_button(
+        'Descargar Excel del corte',
+        generate_excel_bytes(business, f'Corte de caja #{close.id}',
+                             f'Fecha: {close.date} · Responsable: {close.cashier}',
+                             [('Conciliación', detail_rows)]),
+        f'corte-caja-{close.date}-{close.id}.xlsx',
+        'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+        key=f'cash_history_excel_{close.id}', icon=':material/table_view:', width='stretch')
+
+
+def _register_dashboard_rows(day):
+    control_repository = RepositoryFactory.get_cash_control_repository()
+    close_repository = RepositoryFactory.get_cash_close_repository()
+    sale_repository = RepositoryFactory.get_sale_repository()
+    registers = control_repository.get_registers(include_inactive=True)
+    sale_filter = SaleFilter()
+    sale_filter.minimum_date = day
+    sale_filter.maximum_date = day
+    sales = [
+        sale for sale in sale_repository.get_sales_by_filter(sale_filter)
+        if sale.status == 'Completada'
+    ]
+    rows = []
+    for register in registers:
+        opening = control_repository.get_opening(day, register.id)
+        close = (close_repository.get_for_opening(opening.id)
+                 if opening is not None else None)
+        movements = control_repository.get_movements(
+            day, opening.id if opening else None, register.id)
+        movement_totals = control_repository.totals_for_date(
+            day, opening.id if opening else None, register.id)
+        register_sales = [
+            sale for sale in sales
+            if getattr(sale, 'register_id', None) in (None, register.id)
+        ]
+        grouped_sales = {}
+        for sale in register_sales:
+            grouped_sales.setdefault(sale.transaction_id or f'legacy-{sale.id}', []).append(sale)
+        cash_sales = 0.0
+        total_sales = 0.0
+        for operation_sales in grouped_sales.values():
+            amount = sum(float(sale.price.amount) for sale in operation_sales)
+            breakdown = _payment_breakdown(
+                operation_sales[0].payment_method,
+                operation_sales[0].payment_details or '', amount)
+            cash_sales += breakdown['Efectivo']
+            total_sales += amount
+        opening_amount = float(opening.opening_amount.amount) if opening else 0.0
+        estimated_cash = (opening_amount + cash_sales
+                          + movement_totals['Entrada'] - movement_totals['Retiro'])
+        difference = float(close.difference.amount) if close else None
+        rows.append({
+            'ID': register.id,
+            'Caja': register.name,
+            'Codigo': register.code,
+            'Ubicacion': register.location or 'Mostrador',
+            'Estado': 'Cerrada' if close else ('Abierta' if opening else 'Sin abrir'),
+            'Turno': f'#{opening.id}' if opening else 'Pendiente',
+            'Responsable': opening.shift_responsible if opening else 'Sin asignar',
+            'Operaciones': len(grouped_sales),
+            'Ventas': total_sales,
+            'Efectivo estimado': estimated_cash,
+            'Entradas': movement_totals['Entrada'],
+            'Retiros': movement_totals['Retiro'],
+            'Diferencia': difference,
+            'Movimientos': len(movements),
+            'Activa': bool(register.is_active),
+        })
+    return rows
+
+
+def _render_multicash_dashboard():
+    _hero('Tablero multicaja',
+          'Supervisa aperturas, ventas, efectivo estimado y cortes de todas las cajas.',
+          'MULTICAJA · CONTROL EN VIVO')
+    selected_day = st.date_input('Dia operativo', value=mexico_today(),
+                                 key='multicash_dashboard_day')
+    rows = _register_dashboard_rows(selected_day)
+    if not rows:
+        st.info('No hay cajas registradas todavia.', icon=':material/point_of_sale:')
+        st.button('Crear primera caja', icon=':material/add:', width='stretch',
+                  on_click=_navigate_to_page, args=('Apertura de caja',))
+        return
+
+    open_rows = [row for row in rows if row['Estado'] == 'Abierta']
+    closed_rows = [row for row in rows if row['Estado'] == 'Cerrada']
+    pending_rows = [row for row in rows if row['Estado'] == 'Sin abrir']
+    cards = st.columns(4)
+    cards[0].metric('Cajas abiertas', len(open_rows))
+    cards[1].metric('Cajas cerradas', len(closed_rows))
+    cards[2].metric('Sin abrir', len(pending_rows))
+    cards[3].metric('Ventas del dia', _mxn(sum(row['Ventas'] for row in rows)))
+
+    st.dataframe(
+        pd.DataFrame([{key: value for key, value in row.items() if key != 'ID'}
+                      for row in rows]),
+        hide_index=True, width='stretch',
+        column_config={
+            'Ventas': st.column_config.NumberColumn(format='$ %.2f MXN'),
+            'Efectivo estimado': st.column_config.NumberColumn(format='$ %.2f MXN'),
+            'Entradas': st.column_config.NumberColumn(format='$ %.2f MXN'),
+            'Retiros': st.column_config.NumberColumn(format='$ %.2f MXN'),
+            'Diferencia': st.column_config.NumberColumn(format='$ %.2f MXN'),
+        })
+
+    st.markdown('#### Acciones por caja')
+    for row in rows:
+        with st.container(border=True):
+            columns = st.columns((2, 1, 1, 1), vertical_alignment='center')
+            columns[0].markdown(
+                f"**{row['Caja']}** · {row['Codigo']}  \n"
+                f"{row['Estado']} · {row['Responsable']} · "
+                f"Efectivo {_mxn(row['Efectivo estimado'])}")
+            columns[1].button(
+                'Usar caja', key=f"multicash_use_{row['ID']}",
+                icon=':material/point_of_sale:', width='stretch',
+                on_click=_navigate_register_to_page,
+                args=(row['ID'], 'Ventas'))
+            columns[2].button(
+                'Apertura', key=f"multicash_open_{row['ID']}",
+                icon=':material/lock_open:', width='stretch',
+                on_click=_navigate_register_to_page,
+                args=(row['ID'], 'Apertura de caja'))
+            columns[3].button(
+                'Corte', key=f"multicash_close_{row['ID']}",
+                icon=':material/lock:', width='stretch',
+                on_click=_navigate_register_to_page,
+                args=(row['ID'], 'Corte de caja'))
+
+
+def _whatsapp_message_url(number, message):
+    digits = re.sub(r'\D', '', number or '')
+    if not digits:
+        return ''
+    if len(digits) == 10:
+        digits = '52' + digits
+    return f'https://wa.me/{digits}?text={quote(message)}'
+
+
+def _render_free_growth_center():
+    _hero(
+        'Crecimiento gratis',
+        'Acciones para vender más usando lo que ya tienes: inventario, clientes, cartera y catálogo web.',
+        'SIN SERVICIOS DE PAGO · AUTOMATIZACIÓN LOCAL')
+    products = [
+        product for product in RepositoryFactory.get_product_repository().get_all_products()
+        if not product.is_temporary and product.is_active
+    ]
+    sales = [
+        sale for sale in RepositoryFactory.get_sale_repository().get_all_sales()
+        if sale.status == 'Completada'
+    ]
+    customers = RepositoryFactory.get_operations_repository().get_customers()
+    credit_repository = RepositoryFactory.get_credit_account_repository()
+    credit_summary = credit_repository.summary()
+    catalog_settings = RepositoryFactory.get_catalog_repository().get_settings()
+    business_profile = RepositoryFactory.get_business_profile_repository().get_profile()
+    today = mexico_today()
+    recent_limit = today - timedelta(days=30)
+    recent_sales = [sale for sale in sales if sale.date >= recent_limit]
+    product_sales = {}
+    customer_sales = {}
+    for sale in recent_sales:
+        product_name = sale.product_name or getattr(sale.product, 'name', '') or f'Producto #{sale.product_id}'
+        product_stats = product_sales.setdefault(
+            product_name, {'Unidades': 0, 'Venta': 0.0, 'Utilidad': 0.0})
+        product_stats['Unidades'] += 1
+        product_stats['Venta'] += float(sale.price.amount)
+        product_stats['Utilidad'] += float(sale.profit.amount if sale.profit else 0)
+        customer_name = (sale.customer or '').strip()
+        if customer_name and customer_name.lower() != 'público general':
+            customer_stats = customer_sales.setdefault(
+                customer_name, {'Compras': 0, 'Venta': 0.0, 'Última compra': sale.date})
+            customer_stats['Compras'] += 1
+            customer_stats['Venta'] += float(sale.price.amount)
+            customer_stats['Última compra'] = max(customer_stats['Última compra'], sale.date)
+
+    low_stock = [
+        product for product in products
+        if 0 < product.quantity <= (product.minimum_stock or LOW_STOCK_THRESHOLD)
+    ]
+    out_of_stock = [product for product in products if product.quantity <= 0]
+    slow_products = [
+        product for product in products
+        if product.quantity > 0 and (product.name not in product_sales)
+    ]
+    low_margin = [
+        product for product in products
+        if float(product.price.amount) > 0
+        and ((float(product.price.amount) - float(product.cost.amount))
+             / float(product.price.amount)) < .15
+    ]
+    customers_with_phone = [customer for customer in customers if customer.phone]
+    inactive_customers = [
+        customer for customer in customers_with_phone
+        if customer.name not in customer_sales
+    ]
+    catalog_products = [product for product in products if product.catalog_visible]
+    catalog_url = _public_catalog_url(catalog_settings.slug or 'mi-negocio')
+    business_name = business_profile.business_name or 'tu tienda'
+
+    with st.container(horizontal=True):
+        st.metric('Oportunidades hoy', len(low_stock) + len(out_of_stock)
+                  + len(slow_products) + len(inactive_customers)
+                  + len(credit_summary['overdue']), border=True)
+        st.metric('Clientes contactables', len(customers_with_phone), border=True)
+        st.metric('Productos en catálogo', len(catalog_products), border=True)
+        st.metric('Ventas últimos 30 días', _mxn(sum(float(sale.price.amount)
+                  for sale in recent_sales)), border=True)
+
+    plan_rows = []
+    if out_of_stock:
+        plan_rows.append({
+            'Prioridad': 'Crítica', 'Área': 'Inventario',
+            'Acción': f'Reabastecer {len(out_of_stock)} producto(s) agotado(s).',
+            'Ir a': 'Inventario',
+        })
+    if low_stock:
+        plan_rows.append({
+            'Prioridad': 'Alta', 'Área': 'Abastecimiento',
+            'Acción': f'Comprar antes de agotar {len(low_stock)} producto(s) en mínimo.',
+            'Ir a': 'Abastecimiento',
+        })
+    if credit_summary['overdue']:
+        plan_rows.append({
+            'Prioridad': 'Crítica', 'Área': 'Cobranza',
+            'Acción': f'Contactar {len(credit_summary["overdue"])} cuenta(s) vencida(s).',
+            'Ir a': 'Créditos y cartera',
+        })
+    if inactive_customers:
+        plan_rows.append({
+            'Prioridad': 'Media', 'Área': 'Clientes',
+            'Acción': f'Reactivar {len(inactive_customers)} cliente(s) con WhatsApp manual.',
+            'Ir a': 'Clientes',
+        })
+    if slow_products:
+        plan_rows.append({
+            'Prioridad': 'Media', 'Área': 'Ventas',
+            'Acción': f'Promocionar {len(slow_products)} producto(s) con existencia y baja rotación.',
+            'Ir a': 'Mi página web',
+        })
+    if not catalog_settings.is_published:
+        plan_rows.append({
+            'Prioridad': 'Alta', 'Área': 'Catálogo web',
+            'Acción': 'Publicar tu catálogo gratuito para compartirlo por WhatsApp.',
+            'Ir a': 'Mi página web',
+        })
+    if not plan_rows:
+        plan_rows.append({
+            'Prioridad': 'Normal', 'Área': 'Operación',
+            'Acción': 'Mantener venta activa y revisar reportes al cierre.',
+            'Ir a': 'Reportes',
+        })
+
+    plan_tab, campaigns_tab, products_tab, exports_tab = st.tabs(
+        ('Plan de hoy', 'Campañas WhatsApp', 'Productos', 'Exportar plan'))
+
+    with plan_tab:
+        st.subheader('Siguiente mejor acción')
+        st.caption('Priorizado para mejorar ventas y control sin comprar software ni contratar servicios.')
+        st.dataframe(pd.DataFrame(plan_rows), hide_index=True, width='stretch')
+        for index, row in enumerate(plan_rows[:5]):
+            target = row['Ir a']
+            if target in ADMIN_PAGES:
+                st.button(
+                    f"Abrir {target}: {row['Acción']}",
+                    key=f'growth_plan_{index}_{target}',
+                    icon=':material/arrow_forward:',
+                    width='stretch',
+                    on_click=_navigate_to_page,
+                    args=(target,))
+
+    with campaigns_tab:
+        st.subheader('Mensajes listos para WhatsApp manual')
+        st.caption('No usa API de WhatsApp ni cobros. Solo abre un enlace con el texto preparado.')
+        campaign_message = (
+            f'Hola, soy de {business_name}. Te comparto nuestro catálogo actualizado: '
+            f'{catalog_url}. Si necesitas algo, te atendemos por este medio.'
+        )
+        st.text_area('Mensaje general para clientes', value=campaign_message, height=100)
+        if not customers_with_phone:
+            st.info('Agrega teléfonos en Clientes para abrir campañas manuales.',
+                    icon=':material/groups:')
+        else:
+            target_group = st.segmented_control(
+                'Grupo sugerido', ('Clientes inactivos', 'Mejores clientes', 'Todos'),
+                default='Clientes inactivos')
+            if target_group == 'Mejores clientes':
+                ordered_names = sorted(
+                    customer_sales, key=lambda name: customer_sales[name]['Venta'], reverse=True)
+                target_names = set(ordered_names[:20])
+                targets = [customer for customer in customers_with_phone if customer.name in target_names]
+            elif target_group == 'Todos':
+                targets = customers_with_phone[:50]
+            else:
+                targets = inactive_customers[:50]
+            if not targets:
+                st.success('No hay clientes pendientes en este grupo.', icon=':material/check_circle:')
+            for customer in targets[:25]:
+                customer_message = campaign_message.replace('Hola,', f'Hola {customer.name},')
+                columns = st.columns((2, 3, 1), vertical_alignment='center')
+                columns[0].markdown(f'**{customer.name}**')
+                columns[1].caption(customer.phone)
+                link = _whatsapp_message_url(customer.phone, customer_message)
+                if link:
+                    columns[2].link_button(
+                        'Enviar', link, icon=':material/send:', width='stretch')
+
+    with products_tab:
+        st.subheader('Productos para vender, comprar o corregir')
+        product_sections = [
+            ('Agotados', out_of_stock, 'Reabastecer antes de perder ventas.'),
+            ('Existencia baja', low_stock, 'Comprar o transferir existencia.'),
+            ('Baja rotación', slow_products, 'Promocionar o poner en oferta.'),
+            ('Margen bajo', low_margin, 'Revisar costo/precio para no vender sin ganancia.'),
+        ]
+        for title, items, advice in product_sections:
+            with st.expander(f'{title} · {len(items)}', expanded=bool(items),
+                             icon=':material/inventory_2:'):
+                st.caption(advice)
+                if not items:
+                    st.success('Sin pendientes en esta categoría.',
+                               icon=':material/check_circle:')
+                    continue
+                st.dataframe(pd.DataFrame([{
+                    'Producto': product.name,
+                    'Existencia': product.quantity,
+                    'Mínimo': product.minimum_stock or LOW_STOCK_THRESHOLD,
+                    'Costo': float(product.cost.amount),
+                    'Precio': float(product.price.amount),
+                    'Margen': ((float(product.price.amount) - float(product.cost.amount))
+                               / float(product.price.amount)
+                               if float(product.price.amount) else 0),
+                } for product in items]), hide_index=True, width='stretch',
+                    column_config={
+                        'Costo': st.column_config.NumberColumn(format='$ %.2f MXN'),
+                        'Precio': st.column_config.NumberColumn(format='$ %.2f MXN'),
+                        'Margen': st.column_config.NumberColumn(format='percent'),
+                    })
+
+    with exports_tab:
+        st.subheader('Plan descargable')
+        st.caption('Útil para imprimirlo, compartirlo con vendedores o trabajarlo fuera del sistema.')
+        business = _business_export_data()
+        sections = [
+            ('Plan de crecimiento gratis', plan_rows),
+            ('Productos agotados', _inventory_export_rows(out_of_stock)),
+            ('Productos por agotarse', _inventory_export_rows(low_stock)),
+            ('Productos de baja rotación', _inventory_export_rows(slow_products[:100])),
+        ]
+        export_columns = st.columns(3)
+        export_columns[0].download_button(
+            'PDF', generate_pdf_bytes(
+                business, 'Plan de crecimiento gratis',
+                f'Corte al {today}', sections),
+            f'plan-crecimiento-gratis-{today}.pdf', 'application/pdf',
+            icon=':material/picture_as_pdf:', width='stretch')
+        export_columns[1].download_button(
+            'Excel', generate_excel_bytes(
+                business, 'Plan de crecimiento gratis',
+                f'Corte al {today}', sections),
+            f'plan-crecimiento-gratis-{today}.xlsx',
+            'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+            icon=':material/table_view:', width='stretch')
+        export_columns[2].download_button(
+            'HTML', generate_html_bytes(
+                business, 'Plan de crecimiento gratis',
+                f'Corte al {today}', sections),
+            f'plan-crecimiento-gratis-{today}.html', 'text/html',
+            icon=':material/code:', width='stretch')
+
+
 def _render_reports():
     _hero('Reportes', 'Convierte la operación diaria en información financiera clara y exportable.', 'INTELIGENCIA · RESULTADOS')
     period = st.selectbox('Periodo', ('Día', 'Semana', 'Mes', 'Año', 'Personalizado'))
@@ -3792,8 +5204,41 @@ def _render_reports():
         st.error('La fecha inicial no puede ser posterior a la final.')
         return
 
-    result = _summary_for_range(initial_date, final_date)
-    st.caption(f'Del {initial_date} al {final_date}')
+    report_products = [product for product in
+                       RepositoryFactory.get_product_repository().get_all_products()
+                       if not product.is_temporary]
+    product_options = {f'{product.name} (#{product.id})': product.id
+                       for product in report_products}
+    prefill_product_ids = set(st.session_state.pop('report_prefill_product_ids', []))
+    default_product_labels = [
+        label for label, product_id in product_options.items()
+        if product_id in prefill_product_ids
+    ]
+    selected_product_labels = st.multiselect(
+        'Productos vendidos', options=list(product_options),
+        default=default_product_labels,
+        help='Limita ventas, tickets, unidades y utilidad bruta a los productos elegidos.')
+    selected_product_ids = [product_options[label]
+                            for label in selected_product_labels]
+
+    cash_registers = RepositoryFactory.get_cash_control_repository().get_registers(
+        include_inactive=True)
+    register_options = {'Todas las cajas': None}
+    register_options.update({
+        f'{register.name} · {register.code}': register.id
+        for register in cash_registers
+    })
+    selected_register_label = st.selectbox(
+        'Caja', list(register_options),
+        help='Permite comparar una caja especifica o exportar el reporte general.')
+    selected_register_id = register_options[selected_register_label]
+
+    result = _summary_for_range(initial_date, final_date,
+                                selected_product_ids, selected_register_id)
+    st.caption(f'Del {initial_date} al {final_date} · {selected_register_label}')
+    if selected_product_ids:
+        st.info('Los gastos operativos no se asignan por producto; la utilidad neta '
+                'incluye todos los gastos del periodo.', icon=':material/info:')
     report_primary = st.columns(3)
     report_primary[0].metric('Tickets', str(result['sale_quantity']))
     report_primary[1].metric('Ventas brutas', _mxn(result['acquired_money'].amount))
@@ -3808,11 +5253,12 @@ def _render_reports():
         f"{result['unit_quantity']} {units_label} en "
         f"{result['sale_quantity']} {operations_label}.")
 
-    transaction_folios = {}
+    transaction_samples = {}
     for report_sale in result['sales']:
         transaction_key = report_sale.transaction_id or f'legacy-{report_sale.id}'
-        transaction_folios[transaction_key] = min(
-            transaction_folios.get(transaction_key, report_sale.id), report_sale.id)
+        current_sample = transaction_samples.get(transaction_key)
+        if current_sample is None or report_sale.id < current_sample.id:
+            transaction_samples[transaction_key] = report_sale
     grouped_report_sales = {}
     for report_sale in result['sales']:
         transaction_key = report_sale.transaction_id or f'legacy-{report_sale.id}'
@@ -3821,11 +5267,12 @@ def _render_reports():
         row_key = (transaction_key, report_sale.product_id,
                    float(report_sale.price.amount), product_name)
         row = grouped_report_sales.setdefault(row_key, {
-            'Folio': _sale_folio(transaction_folios[transaction_key]),
+            'Folio': _sale_register_folio(transaction_samples[transaction_key]),
             'Producto': product_name, 'Cantidad': 0,
             'Precio unitario': float(report_sale.price.amount), 'Importe': 0.0,
             'Fecha': str(report_sale.date), 'Método': report_sale.payment_method or '',
             'Cliente': report_sale.customer or 'Público general',
+            'Caja': report_sale.register_name or 'Caja principal',
             'Responsable': report_sale.cashier or 'Vendedor',
         })
         row['Cantidad'] += 1
@@ -3846,6 +5293,7 @@ def _render_reports():
 
     summary_rows = [{
         'Periodo': f'{initial_date} al {final_date}',
+        'Caja': selected_register_label,
         'Tickets': result['sale_quantity'],
         'Unidades vendidas': result['unit_quantity'],
         'Ventas brutas': float(result['acquired_money'].amount),
@@ -3863,8 +5311,18 @@ def _render_reports():
     ]
     business = _business_export_data()
     report_title = 'Reporte general de operación'
-    report_subtitle = f'Periodo del {initial_date} al {final_date}'
-    export_columns = st.columns(2)
+    report_subtitle = f'Periodo del {initial_date} al {final_date} · {selected_register_label}'
+    action_columns = st.columns(3)
+    action_columns[0].button(
+        'Ver gastos detallados', icon=':material/payments:', width='stretch',
+        key='reports_go_expenses', on_click=_navigate_to_page, args=('Gastos',))
+    action_columns[1].button(
+        'Abrir inventario', icon=':material/inventory_2:', width='stretch',
+        key='reports_go_inventory', on_click=_navigate_to_page, args=('Inventario',))
+    action_columns[2].button(
+        'Abrir estadísticas', icon=':material/query_stats:', width='stretch',
+        key='reports_go_statistics', on_click=_navigate_to_page, args=('Estadísticas',))
+    export_columns = st.columns(3)
     export_columns[0].download_button(
         'Descargar reporte PDF',
         generate_pdf_bytes(business, report_title, report_subtitle, report_sections),
@@ -3877,6 +5335,12 @@ def _render_reports():
         f'reporte-{initial_date}-{final_date}.xlsx',
         'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
         icon=':material/table_view:', width='stretch',
+    )
+    export_columns[2].download_button(
+        'Descargar reporte HTML',
+        generate_html_bytes(business, report_title, report_subtitle, report_sections),
+        f'reporte-{initial_date}-{final_date}.html', 'text/html',
+        icon=':material/language:', width='stretch',
     )
 
     tab_sales, tab_expenses, tab_low, tab_out = st.tabs([
@@ -4082,8 +5546,30 @@ def _render_customers():
         customer.name, customer.phone or '', customer.email or '', customer.tax_id or '')).lower()]
     st.dataframe(pd.DataFrame([{
         'Nombre': customer.name, 'Teléfono': customer.phone, 'Correo': customer.email,
-        'RFC': customer.tax_id, 'Notas': customer.notes,
+        'RFC': customer.tax_id, 'Puntos': customer.loyalty_points or 0,
+        'Compras acumuladas': (float(customer.lifetime_spend.amount)
+                               if customer.lifetime_spend else 0.0),
+        'Notas': customer.notes,
     } for customer in visible]), hide_index=True, width='stretch')
+    with st.expander('Ajustar puntos de lealtad', icon=':material/loyalty:'):
+        labels = {customer.name: customer for customer in customers}
+        selected_loyalty = st.selectbox('Cliente', list(labels), index=None,
+                                        key='loyalty_customer')
+        point_delta = st.number_input('Puntos a sumar o descontar', step=1,
+                                      key='loyalty_delta')
+        point_reason = st.text_input('Motivo', key='loyalty_reason')
+        if st.button('Aplicar ajuste', type='primary', key='loyalty_adjust'):
+            if selected_loyalty is None:
+                st.error('Selecciona un cliente.')
+            else:
+                try:
+                    operations.adjust_customer_points(
+                        labels[selected_loyalty].id, int(point_delta),
+                        point_reason, _actor_name())
+                    st.success('Puntos actualizados.'); st.rerun()
+                except Exception as error:
+                    st.error(str(error))
+
     with st.expander('Archivar cliente'):
         customer_admin_version = _form_version('customer_admin')
         selected = st.selectbox(
@@ -4103,6 +5589,152 @@ def _render_customers():
                 'anteriores se conservan.', tone='warning', icon=':material/person_remove:')
             _reset_form('customer_admin')
             st.rerun()
+
+
+def _render_sellers():
+    _hero('Vendedores', 'Crea, restablece y suspende accesos del personal de ventas.', 'PERSONAL · ACCESOS')
+    users = RepositoryFactory.get_user_repository()
+    seller_form_version = _form_version('seller_new')
+    with st.expander('Agregar vendedor', icon=':material/person_add:'):
+        with st.form(f'seller_create_form_{seller_form_version}', enter_to_submit=False):
+            display_name = st.text_input('Nombre del vendedor')
+            username = st.text_input('Usuario')
+            password = st.text_input('Contraseña (mínimo 8 caracteres)', type='password')
+            confirmation = st.text_input('Confirmar contraseña', type='password')
+            create = st.form_submit_button('Crear vendedor', type='primary')
+        if create:
+            try:
+                seller = users.create_seller(display_name, username, password, confirmation)
+                RepositoryFactory.get_operations_repository().audit('vendedor_creado', _actor_name(), 'user', seller.id, f'Cuenta creada para {seller.display_name}.')
+                _queue_activity_notice(
+                    'Vendedor creado',
+                    f'La cuenta de {seller.display_name} está lista. Comparte su contraseña por un medio seguro.',
+                    icon=':material/person_add:')
+                _reset_form('seller_new')
+                st.rerun()
+            except Exception as error: st.error(str(error))
+    sellers = users.get_sellers(include_archived=True)
+    if not sellers:
+        st.info('Aún no hay vendedores registrados.')
+        return
+    st.dataframe(pd.DataFrame([{'Nombre': seller.display_name, 'Usuario': seller.username,
+        'Comisión': float(seller.commission_bps or 0) / 100,
+        'Estado': 'Activo' if seller.is_active else 'Suspendido'} for seller in sellers]),
+        hide_index=True, width='stretch',
+        column_config={'Comisión': st.column_config.NumberColumn(format='%.2f %%')})
+    choices = {f'{seller.display_name} · @{seller.username}': seller for seller in sellers}
+    choice = st.selectbox('Administrar vendedor', list(choices), index=None, placeholder='Selecciona una cuenta')
+    if choice is None: return
+    seller = choices[choice]
+    password_form_version = _form_version(f'seller_password_{seller.id}')
+    with st.form(f'seller_password_{seller.id}_{password_form_version}', enter_to_submit=False):
+        new_password = st.text_input('Nueva contraseña', type='password')
+        confirmation = st.text_input('Confirmar nueva contraseña', type='password')
+        reset = st.form_submit_button('Restablecer contraseña')
+    if reset:
+        try:
+            users.reset_seller_password(seller.id, new_password, confirmation)
+            RepositoryFactory.get_operations_repository().audit('contrasena_vendedor_restablecida', _actor_name(), 'user', seller.id, f'Contraseña restablecida para {seller.display_name}.')
+            _queue_activity_notice(
+                'Contraseña restablecida',
+                f'Las sesiones anteriores de {seller.display_name} se cerraron por seguridad.',
+                icon=':material/password:')
+            _reset_form(f'seller_password_{seller.id}')
+            st.rerun()
+        except Exception as error: st.error(str(error))
+    commission = st.number_input('Comisión sobre ventas (%)', min_value=0.0,
+                                 max_value=100.0, step=.25,
+                                 value=float(seller.commission_bps or 0) / 100,
+                                 key=f'seller_commission_{seller.id}')
+    if st.button('Guardar comisión', key=f'seller_commission_save_{seller.id}'):
+        users.set_seller_commission(seller.id, commission)
+        RepositoryFactory.get_operations_repository().audit(
+            'comision_vendedor_actualizada', _actor_name(), 'user', seller.id,
+            f'{seller.display_name} · {commission:.2f}%')
+        _queue_activity_notice(
+            'Comisión actualizada',
+            f'La comisión de {seller.display_name} ahora es {commission:.2f}%.',
+            icon=':material/percent:')
+        st.rerun()
+    action = 'Reactivar' if not seller.is_active else 'Suspender'
+    if st.button(action, key=f'seller_status_{seller.id}'):
+        users.set_seller_active(seller.id, not seller.is_active)
+        RepositoryFactory.get_operations_repository().audit('vendedor_reactivado' if not seller.is_active else 'vendedor_suspendido', _actor_name(), 'user', seller.id, f'{action} acceso de {seller.display_name}.')
+        _queue_activity_notice(
+            f'Vendedor {"reactivado" if not seller.is_active else "suspendido"}',
+            f'El acceso de {seller.display_name} fue {"habilitado" if not seller.is_active else "suspendido"}.',
+            tone='warning' if seller.is_active else 'success',
+            icon=':material/person_off:' if seller.is_active else ':material/person_check:')
+        st.rerun()
+
+
+def _render_change_password():
+    _hero('Mi contraseña', 'Actualiza tu acceso sin compartirlo con otra persona.', 'SEGURIDAD · CUENTA')
+    with st.form('change_own_password', enter_to_submit=False):
+        current = st.text_input('Contraseña actual', type='password')
+        new = st.text_input('Nueva contraseña (mínimo 8 caracteres)', type='password')
+        confirmation = st.text_input('Confirmar nueva contraseña', type='password')
+        submitted = st.form_submit_button('Actualizar contraseña', type='primary')
+    if submitted:
+        try:
+            user = st.session_state['user']
+            RepositoryFactory.get_user_repository().change_password(user.id, current, new, confirmation)
+            RepositoryFactory.get_operations_repository().audit('contrasena_cambiada', _actor_name(), 'user', user.id, 'El usuario actualizó su contraseña.')
+            st.success('Contraseña actualizada. Vuelve a iniciar sesión.'); _log_out()
+        except Exception as error: st.error(str(error))
+
+
+def _render_credit_accounts():
+    _hero('Créditos y cartera', 'Controla saldos, vencimientos y abonos sin servicios externos.', 'COBRANZA · PROVEEDORES')
+    repository = RepositoryFactory.get_credit_account_repository(); summary = repository.summary()
+    cards = st.columns(4)
+    cards[0].metric('Por cobrar', f"${summary['to_collect']:,.2f}")
+    cards[1].metric('Por pagar', f"${summary['to_pay']:,.2f}")
+    cards[2].metric('Vencidas', len(summary['overdue']))
+    cards[3].metric('Vencen en 3 días', len(summary['due_soon']))
+    credit_form_version = _form_version('credit_account_new')
+    with st.expander('Registrar cuenta', icon=':material/add_card:'):
+        with st.form(f'credit_account_form_{credit_form_version}', enter_to_submit=False):
+            kind = st.selectbox('Tipo', ('Cobrar', 'Pagar'))
+            party = st.text_input('Cliente o proveedor')
+            concept = st.text_input('Concepto')
+            first, second = st.columns(2); amount = first.number_input('Importe total', min_value=.01, step=1.0); due = second.date_input('Vencimiento', min_value=mexico_today())
+            reference = st.text_input('Referencia'); down = st.number_input('Enganche en efectivo', min_value=0.0, step=1.0)
+            create = st.form_submit_button('Registrar cuenta', type='primary')
+        if create:
+            try:
+                account = repository.create(kind, party, concept, amount, due, _actor_name(), reference, down)
+                _queue_activity_notice(
+                    'Cuenta registrada',
+                    f'La cuenta #{account.id} de {account.party_name} quedó registrada correctamente.',
+                    icon=':material/add_card:')
+                _reset_form('credit_account_new')
+                st.rerun()
+            except Exception as error: st.error(str(error))
+    accounts = repository.active_accounts()
+    if not accounts:
+        st.info('No hay cuentas pendientes.'); return
+    st.dataframe(pd.DataFrame([{'#': a.id, 'Tipo': a.account_type, 'Responsable': a.party_name, 'Concepto': a.concept, 'Saldo': float(a.balance.amount), 'Vence': a.due_date, 'Estado': a.status} for a in accounts]), hide_index=True, width='stretch', column_config={'Saldo': st.column_config.NumberColumn(format='$ %.2f')})
+    by_label = {f'#{a.id} · {a.party_name} · ${float(a.balance.amount):,.2f}': a for a in accounts}
+    selected = st.selectbox('Registrar abono', list(by_label), index=None, placeholder='Selecciona una cuenta')
+    if selected:
+        account = by_label[selected]
+        payment_form_version = _form_version(f'credit_payment_{account.id}')
+        with st.form(f'credit_payment_{account.id}_{payment_form_version}', enter_to_submit=False):
+            amount = st.number_input('Abono', min_value=.01, max_value=float(account.balance.amount), step=1.0)
+            method = st.selectbox('Método de pago', ('Efectivo', 'Transferencia', 'Tarjeta', 'Otro'))
+            received = st.number_input('Efectivo recibido', min_value=amount, value=amount, step=1.0, disabled=method != 'Efectivo')
+            reference = st.text_input('Referencia del abono'); pay = st.form_submit_button('Aplicar abono', type='primary')
+        if pay:
+            try:
+                repository.register_payment(account.id, amount, method, _actor_name(), reference, received)
+                _queue_activity_notice(
+                    'Abono aplicado',
+                    f'Se registró un abono de {_mxn(amount)} para {account.party_name}.',
+                    icon=':material/payments:')
+                _reset_form(f'credit_payment_{account.id}')
+                st.rerun()
+            except Exception as error: st.error(str(error))
 
 
 def _render_supply():
@@ -4243,35 +5875,191 @@ def _render_supply():
         f'lista-compra-{mexico_today()}.xlsx',
         'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
         icon=':material/table_view:', width='stretch', disabled=downloads_disabled)
-    st.info(
-        'Cuando recibas mercancía, regístrala en Entradas y mermas para actualizar '
-        'existencias, costos y Kardex.', icon=':material/info:')
-    if st.button('Registrar mercancía recibida', type='primary',
-                 icon=':material/add_box:', width='stretch'):
-        _navigate_to_page('Movimientos')
-        st.rerun()
+    supplier_names = sorted({row['Proveedor'] for row in selected_rows})
+    suggested_supplier = supplier_names[0] if len(supplier_names) == 1 else 'Varios proveedores'
+    order_supplier = st.text_input('Proveedor de la orden', value=suggested_supplier,
+                                   key='purchase_order_supplier')
+    if st.button('Guardar como orden de compra', type='primary',
+                 icon=':material/shopping_cart_checkout:', width='stretch',
+                 disabled=downloads_disabled):
+        try:
+            products_by_name = {product.name: product for product in products}
+            items = [{'product_id': products_by_name[row['Producto']].id,
+                      'quantity': row['Cantidad a comprar'],
+                      'unit_cost': row['Costo unitario']} for row in selected_rows]
+            order = RepositoryFactory.get_purchase_order_repository().create(
+                order_supplier, items, purchase_date, general_notes, _actor_name())
+            _queue_activity_notice(
+                'Orden de compra guardada',
+                f'La orden #{order.id} para {order.supplier} quedó lista para recepción.',
+                icon=':material/shopping_cart_checkout:')
+            st.rerun()
+        except Exception as error:
+            st.error(str(error))
+    pending_orders = RepositoryFactory.get_purchase_order_repository().list('Pendiente')
+    if pending_orders:
+        st.subheader('Órdenes pendientes de recibir')
+        st.dataframe(pd.DataFrame([{
+            '#': order.id, 'Proveedor': order.supplier,
+            'Fecha prevista': order.expected_date,
+            'Productos': len(order.items), 'Total': float(order.total.amount),
+        } for order in pending_orders]), hide_index=True, width='stretch',
+            column_config={'Total': st.column_config.NumberColumn(format='$ %.2f MXN')})
+        order_labels = {f'#{order.id} · {order.supplier} · {_mxn(order.total.amount)}': order
+                        for order in pending_orders}
+        order_label = st.selectbox('Orden recibida', list(order_labels), index=None,
+                                   placeholder='Selecciona la orden que llegó')
+        if order_label and st.button('Recibir orden y actualizar inventario',
+                                     icon=':material/inventory:', type='primary'):
+            try:
+                order = RepositoryFactory.get_purchase_order_repository().receive(
+                    order_labels[order_label].id, _actor_name())
+                _queue_activity_notice(
+                    'Orden recibida',
+                    f'La orden #{order.id} actualizó inventario y costos correctamente.',
+                    icon=':material/inventory:')
+                st.rerun()
+            except Exception as error:
+                st.error(str(error))
+
+
+def _render_incidents():
+    _hero('Centro de incidencias',
+          'Registra, asigna y resuelve alertas operativas sin perder su historial.',
+          'SEGUIMIENTO · CONTROL')
+    operations = RepositoryFactory.get_operations_repository()
+    incidents = operations.get_incidents()
+    pending = [item for item in incidents if item.status != 'Resuelta']
+    metrics = st.columns(4)
+    metrics[0].metric('Pendientes', len(pending))
+    metrics[1].metric('Críticas', sum(item.priority == 'Crítica' for item in pending))
+    metrics[2].metric('En revisión', sum(item.status == 'En revisión' for item in pending))
+    metrics[3].metric('Resueltas', sum(item.status == 'Resuelta' for item in incidents))
+
+    incident_form_version = _form_version('incident_new')
+    with st.expander('Reportar incidencia', icon=':material/add_alert:'):
+        with st.form(f'incident_create_form_{incident_form_version}', enter_to_submit=False):
+            columns = st.columns(2)
+            category = columns[0].selectbox(
+                'Área', ('Caja', 'Inventario', 'Ventas', 'Créditos', 'Sistema', 'General'))
+            priority = columns[1].selectbox(
+                'Prioridad', ('Media', 'Alta', 'Crítica', 'Informativa'))
+            title = st.text_input('Título')
+            detail = st.text_area('Descripción')
+            responsible = st.text_input('Responsable sugerido')
+            submitted = st.form_submit_button('Registrar incidencia', type='primary')
+        if submitted:
+            try:
+                incident = operations.create_incident(category, title, detail, priority,
+                                                       _actor_name(), responsible)
+                _queue_activity_notice(
+                    'Incidencia registrada',
+                    f'La incidencia #{incident.id} quedó registrada para seguimiento.',
+                    icon=':material/add_alert:')
+                _reset_form('incident_new')
+                st.rerun()
+            except Exception as error:
+                st.error(str(error))
+
+    status_filter = st.segmented_control(
+        'Mostrar', ('Pendientes', 'Todas', 'Resueltas'), default='Pendientes',
+        key='incident_status_filter')
+    visible = incidents
+    if status_filter == 'Pendientes':
+        visible = pending
+    elif status_filter == 'Resueltas':
+        visible = [item for item in incidents if item.status == 'Resuelta']
+    if visible:
+        st.dataframe(pd.DataFrame([{
+            '#': item.id, 'Prioridad': item.priority, 'Área': item.category,
+            'Incidencia': item.title, 'Estado': item.status,
+            'Responsable': item.responsible or 'Sin asignar',
+            'Creada': item.created_at,
+        } for item in visible]), hide_index=True, width='stretch')
+    else:
+        st.success('No hay incidencias en este filtro.', icon=':material/check_circle:')
+
+    if _is_administrator() and incidents:
+        labels = {f'#{item.id} · {item.title} · {item.status}': item for item in incidents}
+        selected_label = st.selectbox('Dar seguimiento', list(labels), index=None,
+                                      placeholder='Selecciona una incidencia')
+        if selected_label:
+            selected = labels[selected_label]
+            followup_form_version = _form_version(f'incident_followup_{selected.id}')
+            with st.form(f'incident_followup_{selected.id}_{followup_form_version}', enter_to_submit=False):
+                states = ('Nueva', 'En revisión', 'Resuelta')
+                status = st.selectbox('Estado', states, index=states.index(selected.status))
+                responsible = st.text_input('Responsable', value=selected.responsible or '')
+                resolution = st.text_area('Seguimiento o solución', value=selected.resolution or '')
+                update = st.form_submit_button('Guardar seguimiento', type='primary')
+            if update:
+                try:
+                    operations.update_incident(selected.id, status, responsible,
+                                               resolution, _actor_name())
+                    _queue_activity_notice(
+                        'Seguimiento actualizado',
+                        f'La incidencia #{selected.id} ahora está en estado {status}.',
+                        icon=':material/update:')
+                    _reset_form(f'incident_followup_{selected.id}')
+                    st.rerun()
+                except Exception as error:
+                    st.error(str(error))
 
 
 def _render_audit():
     _hero('Auditoría', 'Rastrea ventas, anulaciones y movimientos sensibles sin borrar evidencia.',
           'CONTROL · TRAZABILIDAD')
     operations = RepositoryFactory.get_operations_repository()
-    audit_logs = operations.get_audit_logs()
+    audit_filter_catalog = operations.get_audit_logs(limit=1000)
     stock_movements = operations.get_stock_movements()
     audit_tab, stock_tab, continuity_tab = st.tabs(
         ('Bitácora operativa', 'Kardex de inventario', 'Continuidad y respaldos'))
     with audit_tab:
-        if not audit_logs:
+        if not audit_filter_catalog:
             st.info('La bitácora comenzará a llenarse con las nuevas operaciones.')
         else:
-            event_filter = st.multiselect(
-                'Filtrar eventos', sorted({log.event_type for log in audit_logs}))
-            visible = [log for log in audit_logs if not event_filter or log.event_type in event_filter]
+            earliest = min(log.created_at.date() for log in audit_filter_catalog)
+            latest = max(log.created_at.date() for log in audit_filter_catalog)
+            first_row, second_row = st.columns(2)
+            selected_dates = first_row.date_input(
+                'Periodo', value=(earliest, latest), min_value=earliest, max_value=latest,
+                key='audit_date_range')
+            result_limit = second_row.selectbox(
+                'Mostrar hasta', (100, 300, 1000), index=1, key='audit_result_limit',
+                format_func=lambda value: f'{value} registros')
+            if not isinstance(selected_dates, (tuple, list)) or len(selected_dates) != 2:
+                st.info('Selecciona una fecha inicial y una final para consultar la bitácora.')
+                return
+            initial_date, final_date = selected_dates
+            filter_columns = st.columns(3)
+            event_filter = filter_columns[0].multiselect(
+                'Eventos', sorted({log.event_type for log in audit_filter_catalog}),
+                key='audit_event_filter')
+            actor_filter = filter_columns[1].multiselect(
+                'Responsables', sorted({log.actor for log in audit_filter_catalog}),
+                key='audit_actor_filter')
+            entity_filter = filter_columns[2].multiselect(
+                'Entidades', sorted({log.entity_type for log in audit_filter_catalog}),
+                key='audit_entity_filter')
+            search = st.text_input(
+                'Buscar por folio o detalle',
+                placeholder='Ej. ticket, producto, devolución o nombre',
+                icon=':material/search:', key='audit_search').strip()
+            visible = operations.get_audit_logs(
+                limit=result_limit, initial_date=initial_date, final_date=final_date,
+                event_types=event_filter, actors=actor_filter,
+                entity_types=entity_filter, search=search)
+            st.caption(f'{len(visible)} registro(s) encontrados.')
             st.dataframe(pd.DataFrame([{
                 'Fecha y hora': log.created_at, 'Evento': log.event_type,
                 'Responsable': log.actor, 'Entidad': log.entity_type,
                 'Folio': log.entity_id, 'Detalle': log.detail,
-            } for log in visible]), hide_index=True, width='stretch')
+            } for log in visible]), hide_index=True, width='stretch',
+                column_config={
+                    'Fecha y hora': st.column_config.DatetimeColumn(
+                        format='DD/MM/YYYY HH:mm:ss'),
+                    'Folio': st.column_config.TextColumn(pinned=True),
+                })
     with stock_tab:
         products = {product.id: product.name for product in
                     RepositoryFactory.get_product_repository().get_all_products()}
@@ -4299,6 +6087,11 @@ def _render_audit():
                 'Configura el secreto `BLUE_POS_DATABASE_URL` con una conexión PostgreSQL administrada '
                 'antes de capturar operación real.')
             try:
+                automatic = scheduled_backup(RepositoryFactory.active_database_url())
+                if automatic:
+                    st.success(
+                        f'Respaldo automático protegido: {automatic.name}',
+                        icon=':material/verified_user:')
                 backup_bytes = backup_database_bytes(RepositoryFactory.active_database_url())
                 st.download_button(
                     'Descargar respaldo completo SQLite', backup_bytes,
@@ -4306,6 +6099,39 @@ def _render_audit():
                     icon=':material/database:', width='stretch')
             except Exception as error:
                 st.error(f'No fue posible preparar el respaldo: {error}')
+            with st.expander('Restaurar respaldo SQLite', icon=':material/restore:'):
+                st.warning(
+                    'La restauración reemplaza los datos operativos actuales. Antes se '
+                    'generará una copia descargable de seguridad.')
+                uploaded_backup = st.file_uploader(
+                    'Archivo de respaldo', type=('db', 'sqlite', 'sqlite3'),
+                    key='restore_database_upload')
+                confirmation = st.text_input(
+                    'Escribe RESTAURAR para confirmar', key='restore_database_confirmation')
+                if st.button('Restaurar datos', type='primary',
+                             disabled=uploaded_backup is None,
+                             key='restore_database_button'):
+                    if confirmation != 'RESTAURAR':
+                        st.error('Escribe RESTAURAR exactamente para continuar.')
+                    else:
+                        try:
+                            safety_copy = backup_database_bytes(
+                                RepositoryFactory.active_database_url())
+                            restore_database_bytes(
+                                RepositoryFactory.active_database_url(),
+                                uploaded_backup.getvalue())
+                            st.session_state['restore_safety_copy'] = safety_copy
+                            RepositoryFactory.close_session()
+                            st.success('Respaldo restaurado. La aplicación recargará los datos.')
+                            st.rerun()
+                        except Exception as error:
+                            st.error(f'No fue posible restaurar: {error}')
+                if st.session_state.get('restore_safety_copy'):
+                    st.download_button(
+                        'Descargar copia previa a la restauración',
+                        st.session_state['restore_safety_copy'],
+                        f'antes-de-restaurar-{mexico_today()}.db',
+                        'application/octet-stream', icon=':material/download:')
         st.caption('Los reportes PDF y Excel son exportaciones operativas; no sustituyen un respaldo completo.')
 
 
@@ -4340,6 +6166,35 @@ def _render_business_profile():
     progress.metric('Perfil completado', f'{completion}%')
     progress.progress(completion, text='Información que aparecerá en documentos')
 
+    palette_version = _form_version('profile_palette')
+    selected_palette = st.session_state.pop('profile_color_palette_preview', None) or {}
+    with st.container(border=True):
+        st.caption('Paletas de color')
+        st.write('Puedes volver a una apariencia segura o partir del color actual de tu negocio.')
+        palette_actions = st.columns(2)
+        if palette_actions[0].button(
+                'Restablecer colores por defecto', icon=':material/restart_alt:',
+                key='restore_profile_colors'):
+            st.session_state['profile_color_palette_preview'] = default_color_palette()
+            _reset_form('profile_palette')
+            _queue_activity_notice(
+                'Colores restablecidos',
+                'La vista previa muestra la paleta segura predeterminada. Guarda el perfil para conservarla.',
+                icon=':material/restart_alt:')
+            st.rerun()
+        if palette_actions[1].button(
+                'Sugerir colores de mi marca', icon=':material/auto_awesome:',
+                key='suggest_profile_colors'):
+            st.session_state['profile_color_palette_preview'] = suggested_color_palette(
+                getattr(profile, 'brand_color', None) or DEFAULT_BRAND_COLOR)
+            _reset_form('profile_palette')
+            _queue_activity_notice(
+                'Paleta sugerida',
+                'Se creó una combinación clara y legible a partir del color actual de tu marca. Guarda el perfil para conservarla.',
+                icon=':material/auto_awesome:')
+            st.rerun()
+        st.caption('Estas opciones actualizan la vista previa; no modifican el perfil hasta guardarlo.')
+
     with st.form('business_profile_form', enter_to_submit=False):
         identity_tab, contact_tab, receipt_tab = st.tabs(
             ('Identidad', 'Contacto y ubicación', 'Tickets'))
@@ -4366,13 +6221,86 @@ def _render_business_profile():
             slogan = st.text_input(
                 'Frase de marca', value=profile.slogan or '', max_chars=180,
                 placeholder='Ej. Calidad y servicio cerca de ti')
-            brand_color = st.color_picker(
-                'Color principal de documentos', value=profile.brand_color or '#123B6D')
             logo = st.file_uploader(
                 'Logotipo', type=('png', 'jpg', 'jpeg'),
                 help='PNG o JPG, máximo 2 MB. Recomendado: fondo transparente y al menos 400 px.')
             remove_logo = st.checkbox(
                 'Eliminar el logotipo actual', value=False, disabled=not bool(profile.logo_data))
+            with st.expander('Apariencia segura de interfaz y documentos', expanded=True,
+                             icon=':material/palette:'):
+                st.caption(
+                    'Personaliza colores sin perder legibilidad. El sistema valida contraste '
+                    'para evitar texto blanco sobre blanco, negro sobre negro o fondos oscuros '
+                    'con letras oscuras.')
+                app_colors = st.columns(3)
+                brand_color = app_colors[0].color_picker(
+                    'Color de marca y botones',
+                    value=selected_palette.get(
+                        'brand_color', getattr(profile, 'brand_color', None) or DEFAULT_BRAND_COLOR),
+                    key=f'profile_brand_color_{palette_version}')
+                app_background_color = app_colors[1].color_picker(
+                    'Fondo de la app',
+                    value=selected_palette.get(
+                        'app_background_color', getattr(profile, 'app_background_color', None)
+                        or DEFAULT_APP_BACKGROUND),
+                    key=f'profile_background_color_{palette_version}')
+                app_surface_color = app_colors[2].color_picker(
+                    'Tarjetas y paneles',
+                    value=selected_palette.get(
+                        'app_surface_color', getattr(profile, 'app_surface_color', None)
+                        or DEFAULT_APP_SURFACE),
+                    key=f'profile_surface_color_{palette_version}')
+                document_colors = st.columns(3)
+                app_text_color = document_colors[0].color_picker(
+                    'Texto principal',
+                    value=selected_palette.get(
+                        'app_text_color', getattr(profile, 'app_text_color', None)
+                        or DEFAULT_APP_TEXT),
+                    key=f'profile_text_color_{palette_version}')
+                document_primary_color = document_colors[1].color_picker(
+                    'Color de documentos',
+                    value=selected_palette.get(
+                        'document_primary_color', getattr(profile, 'document_primary_color', None)
+                        or getattr(profile, 'brand_color', None) or DEFAULT_BRAND_COLOR),
+                    key=f'profile_document_primary_color_{palette_version}')
+                document_text_color = document_colors[2].color_picker(
+                    'Texto de documentos',
+                    value=selected_palette.get(
+                        'document_text_color', getattr(profile, 'document_text_color', None)
+                        or DEFAULT_DOCUMENT_TEXT),
+                    key=f'profile_document_text_color_{palette_version}')
+                brand_on_color = readable_text_color(brand_color)
+                app_background_ratio = contrast_ratio(app_text_color, app_background_color)
+                app_surface_ratio = contrast_ratio(app_text_color, app_surface_color)
+                document_ratio = contrast_ratio(document_text_color, '#FFFFFF')
+                st.markdown(
+                    f'''
+                    <div style="border:1px solid #D8DDE4;border-radius:16px;overflow:hidden;margin-top:.7rem">
+                      <div style="background:{app_background_color};color:{app_text_color};padding:16px">
+                        <div style="background:{app_surface_color};color:{app_text_color};
+                          border-radius:14px;padding:16px;border:1px solid rgba(90,100,120,.25)">
+                          <div style="font-size:.78rem;font-weight:800;letter-spacing:.08em;color:{brand_color}">
+                            VISTA PREVIA SEGURA
+                          </div>
+                          <div style="font-size:1.3rem;font-weight:850;margin:.25rem 0">
+                            {escape(business_name or profile.business_name or 'Mi negocio')}
+                          </div>
+                          <span style="display:inline-block;background:{brand_color};color:{brand_on_color};
+                            padding:.45rem .75rem;border-radius:999px;font-weight:800">
+                            Botón / acción principal
+                          </span>
+                        </div>
+                      </div>
+                      <div style="background:#fff;color:{document_text_color};padding:14px 16px">
+                        <strong style="color:{document_primary_color}">Documento / ticket</strong>
+                        <div>Texto legible para reportes, tickets y exportaciones.</div>
+                      </div>
+                    </div>
+                    ''',
+                    unsafe_allow_html=True)
+                st.caption(
+                    f'Contraste app fondo: {app_background_ratio:.2f}:1 · '
+                    f'tarjetas: {app_surface_ratio:.2f}:1 · documentos: {document_ratio:.2f}:1')
 
         with contact_tab:
             contact_columns = st.columns(2)
@@ -4433,18 +6361,26 @@ def _render_business_profile():
                 st.error(str(error), icon=':material/error:')
                 return
             logo_data = base64.b64encode(logo_bytes).decode('ascii')
-        repository.save_profile({
-            'business_name': clean_name, 'legal_name': legal_name.strip(),
-            'business_type': business_type, 'slogan': slogan.strip(),
-            'owner_name': owner_name.strip(), 'phone': phone.strip(),
-            'whatsapp': whatsapp.strip(), 'email': clean_email,
-            'website': website.strip(), 'address': address.strip(),
-            'city': city.strip(), 'state': state.strip(),
-            'postal_code': postal_code.strip(), 'tax_id': tax_id.strip().upper(),
-            'tax_regime': tax_regime.strip(), 'receipt_header': receipt_header.strip(),
-            'receipt_footer': receipt_footer.strip(), 'return_policy': return_policy.strip(),
-            'brand_color': brand_color, 'logo_data': logo_data, 'logo_mime': logo_mime,
-        })
+        try:
+            repository.save_profile({
+                'business_name': clean_name, 'legal_name': legal_name.strip(),
+                'business_type': business_type, 'slogan': slogan.strip(),
+                'owner_name': owner_name.strip(), 'phone': phone.strip(),
+                'whatsapp': whatsapp.strip(), 'email': clean_email,
+                'website': website.strip(), 'address': address.strip(),
+                'city': city.strip(), 'state': state.strip(),
+                'postal_code': postal_code.strip(), 'tax_id': tax_id.strip().upper(),
+                'tax_regime': tax_regime.strip(), 'receipt_header': receipt_header.strip(),
+                'receipt_footer': receipt_footer.strip(), 'return_policy': return_policy.strip(),
+                'brand_color': brand_color, 'app_background_color': app_background_color,
+                'app_surface_color': app_surface_color, 'app_text_color': app_text_color,
+                'document_primary_color': document_primary_color,
+                'document_text_color': document_text_color,
+                'logo_data': logo_data, 'logo_mime': logo_mime,
+            })
+        except ValueError as error:
+            st.error(str(error), icon=':material/contrast:')
+            return
         RepositoryFactory.get_operations_repository().audit(
             'perfil_actualizado', _actor_name(), 'business_profile', profile.id,
             f'{clean_name} · identidad, contacto y documentos actualizados')
@@ -4452,6 +6388,7 @@ def _render_business_profile():
             'Perfil del negocio actualizado',
             f'La identidad y los datos de “{clean_name}” ya se aplican al sistema, '
             'tickets y documentos.', icon=':material/store:')
+        _reset_form('profile_palette')
         st.rerun()
 
 
@@ -5089,6 +7026,19 @@ def _render_returns():
 def _navigate_to_page(target):
     """Callback de navegación; se ejecuta antes de crear el widget del menú."""
     st.session_state['page'] = target
+    st.session_state['command_center_page_jump'] = target
+
+
+def _navigate_register_to_page(register_id, target):
+    """Cambia la caja activa y abre una pantalla relacionada."""
+    st.session_state['active_cash_register_id'] = register_id
+    _navigate_to_page(target)
+
+
+def _open_sales_history():
+    """Abre Ventas directamente en el historial de operaciones."""
+    st.session_state['page'] = 'Ventas'
+    st.session_state['sales_history_open'] = True
 
 
 def _navigate_to_cash_withdrawal(suggested_amount):
@@ -5107,6 +7057,15 @@ def _sidebar_nav_button(page_name, label, icon, key):
 
 
 def _render_sidebar_navigation(is_admin):
+    try:
+        notification_count = sum(
+            item.status != 'Resuelta'
+            for item in RepositoryFactory.get_operations_repository().get_incidents())
+    except Exception:
+        notification_count = 0
+    notification_label = ('Centro de incidencias'
+                          if not notification_count
+                          else f'Incidencias · {notification_count}')
     if is_admin:
         primary_groups = (
             ('Operación diaria', (
@@ -5116,11 +7075,20 @@ def _render_sidebar_navigation(is_admin):
                 ('Movimientos', 'Entradas y mermas', ':material/sync_alt:'),
             )),
             ('Caja', (
+                ('Tablero multicaja', 'Tablero multicaja', ':material/point_of_sale:'),
                 ('Apertura de caja', 'Apertura de caja', ':material/lock_open:'),
                 ('Corte de caja', 'Cierre de caja', ':material/lock:'),
+                ('Historial de turnos y cortes', 'Historial de turnos y cortes', ':material/receipt_long:'),
             )),
         )
         secondary_groups = (
+            ('Seguimiento', ':material/notifications:', (
+                ('Centro de incidencias', notification_label, ':material/notifications:'),
+            )),
+            ('Cartera y equipo', ':material/account_balance_wallet:', (
+                ('Créditos y cartera', 'Créditos y cartera', ':material/account_balance_wallet:'),
+                ('Vendedores', 'Vendedores', ':material/badge:'),
+            )),
             ('Gestión del negocio', ':material/store:', (
                 ('Gastos', 'Gastos', ':material/payments:'),
                 ('Devoluciones', 'Devoluciones', ':material/assignment_return:'),
@@ -5129,6 +7097,7 @@ def _render_sidebar_navigation(is_admin):
                 ('Auditoría', 'Actividad y auditoría', ':material/history:'),
             )),
             ('Análisis y crecimiento', ':material/monitoring:', (
+                ('Crecimiento gratis', 'Crecimiento gratis', ':material/trending_up:'),
                 ('Reportes', 'Reportes', ':material/description:'),
                 ('Estadísticas', 'Estadísticas', ':material/query_stats:'),
                 ('Mi página web', 'Catálogo web', ':material/language:'),
@@ -5137,6 +7106,7 @@ def _render_sidebar_navigation(is_admin):
     else:
         primary_groups = (
             ('Ventas', (
+                ('Mi jornada', 'Mi jornada', ':material/dashboard:'),
                 ('Nueva venta', 'Nueva venta', ':material/point_of_sale:'),
                 ('Cotizaciones', 'Cotizaciones', ':material/request_quote:'),
                 ('Inventario', 'Consultar inventario', ':material/inventory_2:'),
@@ -5147,7 +7117,12 @@ def _render_sidebar_navigation(is_admin):
                 ('Corte de caja', 'Cierre de caja', ':material/lock:'),
             )),
         )
-        secondary_groups = ()
+        secondary_groups = (
+            ('Cuenta y soporte', ':material/support_agent:', (
+                ('Centro de incidencias', notification_label, ':material/notifications:'),
+                ('Mi contraseña', 'Cambiar contraseña', ':material/password:'),
+            )),
+        )
 
     for group_index, (group_label, items) in enumerate(primary_groups):
         st.markdown(f'<div class="sidebar-section-label">{group_label}</div>',
@@ -5322,22 +7297,34 @@ def _render_help_assistant():
 
 
 ADMIN_PAGES = {
-    'Tablero': _render_dashboard, 'Ventas': _render_sales, 'Inventario': _render_inventory,
+    'Tablero': _render_dashboard,
+    'Centro de incidencias': _render_incidents,
+    'Créditos y cartera': _render_credit_accounts,
+    'Vendedores': _render_sellers,
+    'Ventas': _render_sales,
+    'Venta express': _render_express_sale, 'Cotizaciones': _render_quotes,
+    'Inventario': _render_inventory,
     'Movimientos': _render_inventory_movements,
+    'Tablero multicaja': _render_multicash_dashboard,
     'Apertura de caja': _render_cash_opening, 'Corte de caja': _render_cash_close,
+    'Historial de turnos y cortes': _render_cash_history,
     'Gastos': _render_expenses, 'Devoluciones': _render_returns,
     'Clientes': _render_customers, 'Abastecimiento': _render_supply, 'Auditoría': _render_audit,
+    'Crecimiento gratis': _render_free_growth_center,
     'Reportes': _render_reports, 'Estadísticas': _render_statistics,
     'Mi perfil': _render_business_profile, 'Mi página web': _render_catalog_manager,
     'Asistente ECCOS': _render_help_assistant,
 }
 SELLER_PAGES = {
+    'Mi jornada': _render_seller_dashboard,
+    'Centro de incidencias': _render_incidents,
     'Nueva venta': _render_sales,
     'Cotizaciones': _render_quotes,
     'Inventario': _render_inventory_readonly,
     'Venta express': _render_express_sale,
     'Apertura de caja': _render_cash_opening,
     'Corte de caja': _render_cash_close,
+    'Mi contraseña': _render_change_password,
     'Asistente ECCOS': _render_help_assistant,
 }
 
@@ -5355,12 +7342,31 @@ def _render_app():
         st.session_state['_workspace_schema_version'] = WORKSPACE_SCHEMA_VERSION
     pages = ADMIN_PAGES if _is_administrator() else SELLER_PAGES
     business_profile = RepositoryFactory.get_business_profile_repository().get_profile()
-    brand_color = (business_profile.brand_color or '#123B6D')
+    brand_color = normalize_hex_color(business_profile.brand_color or DEFAULT_BRAND_COLOR)
+    app_background_color = normalize_hex_color(
+        getattr(business_profile, 'app_background_color', None) or DEFAULT_APP_BACKGROUND,
+        DEFAULT_APP_BACKGROUND)
+    app_surface_color = normalize_hex_color(
+        getattr(business_profile, 'app_surface_color', None) or DEFAULT_APP_SURFACE,
+        DEFAULT_APP_SURFACE)
+    app_text_color = normalize_hex_color(
+        getattr(business_profile, 'app_text_color', None) or DEFAULT_APP_TEXT,
+        DEFAULT_APP_TEXT)
+    on_primary_color = readable_text_color(brand_color)
     st.markdown(
-        f'<style>:root{{--primary:{brand_color};}}'
+        f'<style>:root{{--primary:{brand_color};--canvas:{app_background_color};'
+        f'--surface:{app_surface_color};--ink:{app_text_color};'
+        f'--on-primary:{on_primary_color};}}'
+        f'html,body,.stApp{{background:{app_background_color} !important;'
+        f'color:{app_text_color} !important;}}'
+        f'[data-testid="stHeader"],[data-testid="stVerticalBlockBorderWrapper"]'
+        f'{{background:{app_surface_color} !important;color:{app_text_color} !important;}}'
         f'[data-testid="stSidebar"] [role="radiogroup"] label:has(input:checked)'
         f'{{border-left-color:{brand_color} !important;}}'
-        f'button[kind="primary"]{{background:{brand_color} !important;}}</style>',
+        f'button[kind="primary"]{{background:{brand_color} !important;'
+        f'color:{on_primary_color} !important;}}'
+        f'button[kind="primary"] p,button[kind="primary"] span'
+        f'{{color:{on_primary_color} !important;}}</style>',
         unsafe_allow_html=True)
     if st.session_state.get('page') not in pages:
         st.session_state['page'] = next(iter(pages))
@@ -5381,6 +7387,9 @@ def _render_app():
             f'<div class="sidebar-user-role">Sesión activa · {role_label}</div>'
             f'</div>', unsafe_allow_html=True)
 
+        active_register = _render_cash_register_selector()
+        st.caption(f'Operando en: {active_register.name}')
+
         utility_columns = st.columns(2, gap='small')
         if _is_administrator():
             utility_columns[0].button(
@@ -5390,8 +7399,10 @@ def _render_app():
                 args=('Mi perfil',))
         else:
             utility_columns[0].button(
-                'Mi jornada', icon=':material/badge:', width='stretch', disabled=True,
-                key='sidebar_utility_shift')
+                'Mi jornada', icon=':material/badge:', width='stretch',
+                type='primary' if st.session_state.get('page') == 'Mi jornada' else 'secondary',
+                key='sidebar_utility_shift', on_click=_navigate_to_page,
+                args=('Mi jornada',))
         utility_columns[1].button(
             'Ayuda', icon=':material/support_agent:', width='stretch',
             type='primary' if st.session_state.get('page') == 'Asistente ECCOS' else 'secondary',
@@ -5411,6 +7422,7 @@ def _render_app():
         )
 
     _render_activity_notice()
+    _render_command_center(user, pages, business_profile)
     with authorization_context(getattr(user, 'role', '')):
         pages[st.session_state['page']]()
 

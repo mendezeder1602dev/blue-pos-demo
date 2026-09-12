@@ -15,6 +15,8 @@ from model.repository.cash_control import CashControlRepository
 from model.repository.operations import OperationsRepository
 from model.repository.catalog import CatalogRepository
 from model.repository.store_credit import StoreCreditRepository
+from model.repository.credit_accounts import CreditAccountRepository
+from model.repository.purchase_order import PurchaseOrderRepository
 
 
 __BLUE_POS_FOLDER_PATH = Path(os.path.join(str(Path.home()), '.blue-pos/'))
@@ -60,6 +62,8 @@ class RepositoryFactory:
     __operations_repository = None
     __catalog_repository = None
     __store_credit_repository = None
+    __credit_account_repository = None
+    __purchase_order_repository = None
 
     @staticmethod
     def activate_workspace(url: str):
@@ -91,6 +95,8 @@ class RepositoryFactory:
         RepositoryFactory.__operations_repository = None
         RepositoryFactory.__catalog_repository = None
         RepositoryFactory.__store_credit_repository = None
+        RepositoryFactory.__credit_account_repository = None
+        RepositoryFactory.__purchase_order_repository = None
 
     @staticmethod
     def workspace_url(workspace_key: str) -> str:
@@ -214,6 +220,20 @@ class RepositoryFactory:
         return RepositoryFactory.__store_credit_repository
 
     @staticmethod
+    def get_credit_account_repository(url: str = None):
+        RepositoryFactory.__create_session_if_necessary(url)
+        if RepositoryFactory.__credit_account_repository is None:
+            RepositoryFactory.__credit_account_repository = CreditAccountRepository(RepositoryFactory.__session)
+        return RepositoryFactory.__credit_account_repository
+
+    @staticmethod
+    def get_purchase_order_repository(url: str = None):
+        RepositoryFactory.__create_session_if_necessary(url)
+        if RepositoryFactory.__purchase_order_repository is None:
+            RepositoryFactory.__purchase_order_repository = PurchaseOrderRepository(RepositoryFactory.__session)
+        return RepositoryFactory.__purchase_order_repository
+
+    @staticmethod
     def active_database_url():
         return RepositoryFactory.__url or DB_URL
 
@@ -263,6 +283,8 @@ class RepositoryFactory:
         RepositoryFactory.__operations_repository = None
         RepositoryFactory.__catalog_repository = None
         RepositoryFactory.__store_credit_repository = None
+        RepositoryFactory.__credit_account_repository = None
+        RepositoryFactory.__purchase_order_repository = None
         RepositoryFactory.__auth_session = None
         RepositoryFactory.__auth_engine = None
         RepositoryFactory.__auth_user_repository = None

@@ -42,6 +42,19 @@ class TestOperationsRepository(unittest.TestCase):
         self.assertEqual((movement.previous_stock, movement.resulting_stock), (10, 15))
         self.assertEqual(self.repository.get_audit_logs()[0].event_type, 'inventario_ajustado')
 
+    def test_audit_log_filters_by_event_actor_entity_and_search(self):
+        self.repository.audit('venta_registrada', 'Ana', 'sale', 'T-100',
+                              'Venta de café de Veracruz')
+        self.repository.audit('caja_abierta', 'Luis', 'cash_opening', '1',
+                              'Inicio de turno matutino')
+
+        logs = self.repository.get_audit_logs(
+            event_types=['venta_registrada'], actors=['Ana'],
+            entity_types=['sale'], search='T-100')
+
+        self.assertEqual(len(logs), 1)
+        self.assertEqual(logs[0].detail, 'Venta de café de Veracruz')
+
     def test_hold_sale_preserves_quantity_and_negotiated_price(self):
         held = self.repository.hold_sale(
             'Cliente en espera', '', 'Vendedor', {self.product.id: 2},

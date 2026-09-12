@@ -15,4 +15,4 @@ result = runner.run(test_suite)
 
 tear_down()
 
-sys.exit(len(result.failures))
+sys.exit(len(result.failures) + len(result.errors))

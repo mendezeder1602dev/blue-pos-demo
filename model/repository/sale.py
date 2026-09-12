@@ -7,7 +7,7 @@ from uuid import uuid4
 
 from sqlalchemy import update, select, delete, cast, Numeric, asc, desc, Float, func
 
-from model.entity.models import (CashClose, CashMovement, CashOpening, Product,
+from model.entity.models import (CashClose, CashMovement, CashOpening, Customer, Product,
                                  ReturnLossRequest, Sale, StockMovement,
                                  StoreCreditMovement, StoreCreditVoucher)
 from sqlalchemy.orm import Session, aliased
@@ -16,6 +16,7 @@ from model.repository.exc.product import NonExistentProductException, NoPositive
 from model.repository.exc.sale import NoEnoughProductQuantityException, NonExistentSaleException, \
     ChangeProductIdInSaleException
 from model.repository.observer import RepositoryObserver
+from model.repository.credit_accounts import CreditAccountRepository
 from model.util.monetary_types import CUPMoney
 from model.authorization import require_role
 from model.timezone import mexico_now, mexico_today
@@ -96,7 +97,7 @@ class SaleRepository(RepositoryObserver):
 
     def insert_sales(self, sale: Sale, quantity: int, voucher_code: str = '',
                      voucher_amount: float = 0, actor: str = 'Vendedor') -> list:
-        self.__require_open_cash()
+        self.__require_open_cash(getattr(sale, 'register_id', None))
         self.__check_quantity_is_positive(quantity)
         self.__check_price_is_positive(sale)
         self.__check_cost_is_not_negative(sale)
@@ -130,9 +131,11 @@ class SaleRepository(RepositoryObserver):
         return sales
 
     def insert_transaction(self, entries: list, voucher_code: str = '',
-                           voucher_amount: float = 0, actor: str = 'Vendedor') -> list:
+                           voucher_amount: float = 0, actor: str = 'Vendedor',
+                           credit_account: dict = None) -> list:
         """Registra todos los renglones de un cobro como una operación atómica."""
-        self.__require_open_cash()
+        register_id = getattr(entries[0][0], 'register_id', None)
+        self.__require_open_cash(register_id)
         if not entries:
             raise ValueError('A transaction must contain at least one product.')
         transaction_id = uuid4().hex
@@ -157,6 +160,8 @@ class SaleRepository(RepositoryObserver):
                 if (voucher is None or voucher.status != 'Activo'
                         or applied <= 0 or float(voucher.balance.amount) < applied):
                     raise ValueError('El vale no existe o su saldo ya no es suficiente.')
+            if credit_account is not None:
+                self.__validate_registered_credit_customer(credit_account.get('customer', ''))
             for sale, quantity in entries:
                 sale.transaction_id = transaction_id
                 inserted_sales.extend(self.__execute_insertion_and_return_sales(sale, quantity))
@@ -179,6 +184,15 @@ class SaleRepository(RepositoryObserver):
                 ))
                 if remaining > 0:
                     self.__rollover_voucher(voucher, remaining, transaction_id, actor)
+            if credit_account is not None:
+                account = CreditAccountRepository(self.__session).create(
+                    'Cobrar', credit_account['customer'],
+                    f'Venta a crédito · {transaction_id[:8].upper()}',
+                    credit_account['total'], credit_account['due_date'], actor,
+                    reference=transaction_id,
+                    initial_payment=credit_account.get('down_payment', 0),
+                    commit=False, register_id=register_id)
+                credit_account['account'] = account
             self.__session.commit()
         except Exception:
             self.__session.rollback()
@@ -186,18 +200,29 @@ class SaleRepository(RepositoryObserver):
         self._notify_on_data_changed_listeners()
         return inserted_sales
 
-    def __require_open_cash(self):
+    def __validate_registered_credit_customer(self, customer_name):
+        """El crédito sólo puede generarse contra un cliente activo del directorio."""
+        name = (customer_name or '').strip()
+        if not name or name.casefold() in ('público general', 'publico general'):
+            raise ValueError('Selecciona un cliente registrado para la venta a crédito.')
+        customer = self.__session.scalar(select(Customer).where(
+            Customer.name.ilike(name), Customer.is_active == True))
+        if customer is None:
+            raise ValueError('Registra el cliente antes de vender a crédito.')
+
+    def __require_open_cash(self, register_id=None):
         if not self.__enforce_open_cash:
             return
-        active = self.__session.scalar(
-            select(CashOpening.id).where(
+        statement = select(CashOpening.id).where(
                 CashOpening.date == mexico_today(),
                 ~select(CashClose.id).where(
                     CashClose.opening_id == CashOpening.id).exists(),
-            ).limit(1)
-        )
+            )
+        if register_id is not None:
+            statement = statement.where(CashOpening.register_id == int(register_id))
+        active = self.__session.scalar(statement.limit(1))
         if active is None:
-            raise ValueError('No hay un turno de caja abierto para registrar la venta.')
+            raise ValueError('No hay un turno de caja abierto para registrar la venta en esta caja.')
 
     def __rollover_voucher(self, source, remaining, transaction_id, actor):
         """Agota el código anterior y transfiere su remanente a uno nuevo."""
@@ -264,6 +289,8 @@ class SaleRepository(RepositoryObserver):
                 product_name=getattr(sale, 'product_name', ''),
                 cashier=getattr(sale, 'cashier', 'Vendedor'),
                 status=getattr(sale, 'status', 'Completada'),
+                register_id=getattr(sale, 'register_id', None),
+                register_name=getattr(sale, 'register_name', 'Caja principal'),
                 customer=getattr(sale, 'customer', 'Público general'),
             )
             sales.append(a_sale)
@@ -495,12 +522,17 @@ class SaleRepository(RepositoryObserver):
             if refund_method == 'Efectivo' and self.__enforce_open_cash:
                 value = sum(float(sales_by_id[sale_id].price.amount)
                             for sale_id, _ in selected)
+                sample_sale = sales_by_id[selected[0][0]]
+                statement = select(CashOpening).where(
+                    CashOpening.date == mexico_today(),
+                    ~select(CashClose.id).where(
+                        CashClose.opening_id == CashOpening.id).exists(),
+                )
+                if getattr(sample_sale, 'register_id', None) is not None:
+                    statement = statement.where(
+                        CashOpening.register_id == int(sample_sale.register_id))
                 active_opening = self.__session.scalar(
-                    select(CashOpening).where(
-                        CashOpening.date == mexico_today(),
-                        ~select(CashClose.id).where(
-                            CashClose.opening_id == CashOpening.id).exists(),
-                    ).order_by(CashOpening.created_at.desc()).limit(1)
+                    statement.order_by(CashOpening.created_at.desc()).limit(1)
                 )
                 if active_opening is None:
                     raise ValueError(
@@ -510,6 +542,8 @@ class SaleRepository(RepositoryObserver):
                     movement_type='Retiro', amount=CUPMoney(f'{value:.2f}'),
                     reason=f'Reembolso de venta {transaction_id}: {reason}',
                     authorized_by=actor,
+                    register_id=active_opening.register_id,
+                    register_name=active_opening.register_name,
                 ))
             self.__session.commit()
         except Exception:

@@ -48,6 +48,8 @@ class Product(Base):
     category = Column(String(length=80), nullable=True, default='General')
     supplier = Column(String(length=120), nullable=True, default='')
     minimum_stock = Column(Integer, nullable=False, default=5)
+    wholesale_min_quantity = Column(Integer, nullable=False, default=0)
+    wholesale_price = Column(MoneyColumn(), nullable=False, default=CUPMoney('0.00'))
     is_active = Column(Boolean, nullable=False, default=True, index=True)
     catalog_visible = Column(Boolean, nullable=False, default=False, index=True)
     catalog_featured = Column(Boolean, nullable=False, default=False)
@@ -99,10 +101,13 @@ class Sale(Base):
     refund_method = Column(String(length=50), nullable=True, default='')
     # Destino físico de la unidad devuelta: vuelve a venta o queda dada de baja.
     return_disposition = Column(String(length=30), nullable=True, default='')
+    register_id = Column(Integer, ForeignKey('cash_registers.id'), nullable=True, index=True)
+    register_name = Column(String(length=80), nullable=True, default='Caja principal')
     customer = Column(String(length=120), nullable=True, default='Público general')
     # Las eliminaciones físicas sólo se reservan para mantenimiento/pruebas. La
     # aplicación usa archivado lógico y nunca invoca este borrado sobre ventas reales.
     product = relationship('Product', backref=backref('sales', cascade='all,delete'))
+    register = relationship('CashRegister')
 
     @property
     def profit(self):
@@ -251,6 +256,79 @@ class StoreCreditMovement(Base):
     voucher = relationship('StoreCreditVoucher', backref='movements')
 
 
+class CreditAccount(Base):
+    __tablename__ = 'credit_accounts'
+    id = Column(Integer, primary_key=True)
+    account_type = Column(String(length=20), nullable=False, index=True)
+    party_name = Column(String(length=120), nullable=False, index=True)
+    concept = Column(String(length=250), nullable=False)
+    reference = Column(String(length=80), nullable=True, default='')
+    original_amount = Column(MoneyColumn(), nullable=False)
+    balance = Column(MoneyColumn(), nullable=False, index=True)
+    due_date = Column(Date, nullable=False, index=True)
+    status = Column(String(length=20), nullable=False, default='Pendiente', index=True)
+    created_by = Column(String(length=120), nullable=False, default='Administrador')
+    created_at = Column(DateTime, nullable=False, default=mexico_now)
+    initial_payment = Column(MoneyColumn(), nullable=False, default=CUPMoney('0.00'))
+
+
+class CreditPayment(Base):
+    __tablename__ = 'credit_payments'
+    id = Column(Integer, primary_key=True)
+    account_id = Column(Integer, ForeignKey('credit_accounts.id', ondelete='RESTRICT'), nullable=False, index=True)
+    amount = Column(MoneyColumn(), nullable=False)
+    amount_received = Column(MoneyColumn(), nullable=False, default=CUPMoney('0.00'))
+    change_amount = Column(MoneyColumn(), nullable=False, default=CUPMoney('0.00'))
+    payment_method = Column(String(length=30), nullable=False)
+    reference = Column(String(length=120), nullable=True, default='')
+    received_by = Column(String(length=120), nullable=False)
+    created_at = Column(DateTime, nullable=False, default=mexico_now)
+    account = relationship('CreditAccount', backref='payments')
+
+
+class OperationalIncident(Base):
+    """Alerta operativa persistente con seguimiento y cierre auditable."""
+    __tablename__ = 'operational_incidents'
+    id = Column(Integer, primary_key=True)
+    source_key = Column(String(length=160), nullable=True, index=True, default='')
+    category = Column(String(length=40), nullable=False, index=True)
+    title = Column(String(length=180), nullable=False)
+    detail = Column(String(length=800), nullable=True, default='')
+    priority = Column(String(length=20), nullable=False, default='Media', index=True)
+    status = Column(String(length=20), nullable=False, default='Nueva', index=True)
+    responsible = Column(String(length=120), nullable=True, default='')
+    resolution = Column(String(length=800), nullable=True, default='')
+    created_by = Column(String(length=120), nullable=False, default='Sistema')
+    created_at = Column(DateTime, nullable=False, default=mexico_now, index=True)
+    updated_at = Column(DateTime, nullable=False, default=mexico_now)
+    resolved_at = Column(DateTime, nullable=True)
+
+
+class PurchaseOrder(Base):
+    __tablename__ = 'purchase_orders'
+    id = Column(Integer, primary_key=True)
+    supplier = Column(String(length=120), nullable=False, index=True)
+    status = Column(String(length=20), nullable=False, default='Pendiente', index=True)
+    expected_date = Column(Date, nullable=True)
+    total = Column(MoneyColumn(), nullable=False, default=CUPMoney('0.00'))
+    notes = Column(String(length=500), nullable=True, default='')
+    created_by = Column(String(length=120), nullable=False)
+    created_at = Column(DateTime, nullable=False, default=mexico_now, index=True)
+    received_at = Column(DateTime, nullable=True)
+    items = relationship('PurchaseOrderItem', back_populates='order', cascade='all, delete-orphan')
+
+
+class PurchaseOrderItem(Base):
+    __tablename__ = 'purchase_order_items'
+    id = Column(Integer, primary_key=True)
+    order_id = Column(Integer, ForeignKey('purchase_orders.id', ondelete='CASCADE'), nullable=False, index=True)
+    product_id = Column(Integer, ForeignKey('products.id', ondelete='RESTRICT'), nullable=False)
+    product_name = Column(String(length=80), nullable=False)
+    quantity = Column(Integer, nullable=False)
+    unit_cost = Column(MoneyColumn(), nullable=False)
+    order = relationship('PurchaseOrder', back_populates='items')
+
+
 class AuditLog(Base):
     """Bitácora operativa inmutable para acciones sensibles."""
     __tablename__ = 'audit_logs'
@@ -273,6 +351,19 @@ class Customer(Base):
     tax_id = Column(String(length=40), nullable=True, default='')
     notes = Column(String(length=400), nullable=True, default='')
     is_active = Column(Boolean, nullable=False, default=True)
+    loyalty_points = Column(Integer, nullable=False, default=0)
+    lifetime_spend = Column(MoneyColumn(), nullable=False, default=CUPMoney('0.00'))
+    created_at = Column(DateTime, nullable=False, default=mexico_now)
+
+
+class CashRegister(Base):
+    """Caja/terminal física o lógica que puede tener su propio turno."""
+    __tablename__ = 'cash_registers'
+    id = Column(Integer, primary_key=True)
+    name = Column(String(length=80), nullable=False, unique=True, default='Caja principal')
+    code = Column(String(length=30), nullable=False, unique=True, default='MAIN')
+    location = Column(String(length=120), nullable=True, default='')
+    is_active = Column(Boolean, nullable=False, default=True, index=True)
     created_at = Column(DateTime, nullable=False, default=mexico_now)
 
 
@@ -288,7 +379,10 @@ class CashOpening(Base):
     notes = Column(String(length=400), nullable=True, default='')
     denomination_details = Column(Text, nullable=True, default='{}')
     source_close_id = Column(Integer, nullable=True)
+    register_id = Column(Integer, ForeignKey('cash_registers.id'), nullable=True, index=True)
+    register_name = Column(String(length=80), nullable=True, default='Caja principal')
     created_at = Column(DateTime, nullable=False, default=mexico_now)
+    register = relationship('CashRegister')
 
 
 class CashMovement(Base):
@@ -301,7 +395,10 @@ class CashMovement(Base):
     amount = Column(MoneyColumn(), nullable=False)
     reason = Column(String(length=300), nullable=False)
     authorized_by = Column(String(length=120), nullable=False)
+    register_id = Column(Integer, ForeignKey('cash_registers.id'), nullable=True, index=True)
+    register_name = Column(String(length=80), nullable=True, default='Caja principal')
     created_at = Column(DateTime, nullable=False, default=mexico_now)
+    register = relationship('CashRegister')
 
 
 class CashClose(Base):
@@ -328,7 +425,10 @@ class CashClose(Base):
     difference = Column(MoneyColumn(), nullable=False, default=CUPMoney('0.00'))
     notes = Column(String(length=600), nullable=True, default='')
     denomination_details = Column(Text, nullable=True, default='{}')
+    register_id = Column(Integer, ForeignKey('cash_registers.id'), nullable=True, index=True)
+    register_name = Column(String(length=80), nullable=True, default='Caja principal')
     created_at = Column(DateTime, nullable=False, default=mexico_now)
+    register = relationship('CashRegister')
 
 
 class BusinessProfile(Base):
@@ -354,6 +454,11 @@ class BusinessProfile(Base):
     receipt_footer = Column(String(length=500), nullable=True, default='Gracias por su compra.')
     return_policy = Column(String(length=500), nullable=True, default='')
     brand_color = Column(String(length=7), nullable=True, default='#123B6D')
+    app_background_color = Column(String(length=7), nullable=True, default='#F1F3F6')
+    app_surface_color = Column(String(length=7), nullable=True, default='#FFFFFF')
+    app_text_color = Column(String(length=7), nullable=True, default='#111820')
+    document_primary_color = Column(String(length=7), nullable=True, default='#123B6D')
+    document_text_color = Column(String(length=7), nullable=True, default='#111820')
     logo_data = Column(Text, nullable=True, default='')
     logo_mime = Column(String(length=40), nullable=True, default='')
 
@@ -380,6 +485,8 @@ class User(Base):
     recovery_hash = Column(String(length=300), nullable=False)
     role = Column(String(length=30), nullable=False, default='store')
     display_name = Column(String(length=120), nullable=True, default='')
+    is_active = Column(Boolean, nullable=False, default=True)
+    commission_bps = Column(Integer, nullable=False, default=0)
     # El usuario sólo vive en la base de autenticación.  Los datos operativos
     # se guardan en la base indicada por esta clave, nunca mezclados aquí.
     workspace_key = Column(String(length=180), nullable=True, default='primary')

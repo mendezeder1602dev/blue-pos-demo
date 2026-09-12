@@ -44,6 +44,22 @@ class UserSecurityTest(unittest.TestCase):
                     'admin_seguridad', 'incorrecto', 'Nueva-Clave-Segura-2026')
         self.assertIsNotNone(self.user.recovery_blocked_until)
 
+    def test_rejects_common_or_single_class_passwords(self):
+        with self.assertRaisesRegex(ValueError, 'demasiado común'):
+            self.repository.create_seller(
+                'Vendedor seguro', 'vendedor_seguro', 'admin1234', 'admin1234')
+        with self.assertRaisesRegex(ValueError, 'combinar letras'):
+            self.repository.create_seller(
+                'Vendedor simple', 'vendedor_simple', 'sololetras', 'sololetras')
+
+    def test_password_change_accepts_stronger_password_and_revokes_session(self):
+        token = self.repository.create_session(self.user)
+        self.repository.change_password(
+            self.user.id, 'Clave-Segura-2026', 'Otra-Clave-2026', 'Otra-Clave-2026')
+        self.assertIsNone(self.repository.authenticate_session(token))
+        self.assertIsNotNone(
+            self.repository.authenticate('admin_seguridad', 'Otra-Clave-2026'))
+
 
 if __name__ == '__main__':
     unittest.main()

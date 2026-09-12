@@ -8,6 +8,7 @@ from model.repository.exc.sale import NoEnoughProductQuantityException, NonExist
     ChangeProductIdInSaleException
 from model.repository.factory import RepositoryFactory
 from model.repository.sale import SaleFilter
+from model.schema import create_database
 from model.util.monetary_types import CUPMoney
 from tests.util.general import TEST_DB_URL, delete_all_products_from_database, insert_product_and_return_it, \
     get_all_sales_from_database, assert_sale_lists_are_equal_ignoring_id, get_one_product_from_database, \
@@ -20,6 +21,9 @@ from tests.util.generators.sale import SaleGenerator
 class TestSaleRepository(unittest.TestCase):
 
     def setUp(self):
+        # La app ejecuta estas migraciones antes de abrir los repositorios; las
+        # pruebas deben hacerlo igual para no validar un esquema incompleto.
+        create_database(TEST_DB_URL)
         self.sale_repository = RepositoryFactory.get_sale_repository(TEST_DB_URL)
         bind = self.sale_repository._SaleRepository__session.bind
         StoreCreditVoucher.__table__.create(bind, checkfirst=True)

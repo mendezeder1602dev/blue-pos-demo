@@ -11,6 +11,27 @@ from model.timezone import mexico_now
 
 
 DEMO_CLEANUP_MIGRATION = 'clean_demo_2026_08_25_release_v2'
+CURRENT_SCHEMA_MIGRATION = '2026_09_10_multicaja_local_v1'
+
+
+def _record_schema_migration(connection, migration_key):
+    """Deja evidencia de la versión de esquema aplicada a cada negocio.
+
+    Las migraciones históricas son idempotentes para poder reparar instalaciones
+    antiguas. Al terminar correctamente se registra su versión; las siguientes
+    migraciones deben agregarse como nuevas claves, nunca reutilizar ésta.
+    """
+    connection.execute(text(
+        'CREATE TABLE IF NOT EXISTS schema_migrations ('
+        'migration_key VARCHAR(120) PRIMARY KEY, applied_at VARCHAR(40) NOT NULL)'))
+    already_applied = connection.execute(text(
+        'SELECT 1 FROM schema_migrations WHERE migration_key = :key'),
+        {'key': migration_key}).first()
+    if not already_applied:
+        connection.execute(text(
+            'INSERT INTO schema_migrations (migration_key, applied_at) '
+            'VALUES (:key, :applied_at)'),
+            {'key': migration_key, 'applied_at': mexico_now().isoformat()})
 
 
 def _allow_multiple_cash_shifts(engine):
@@ -105,6 +126,7 @@ def _allow_multiple_cash_shifts(engine):
 def _clean_demo_operational_data_once(engine):
     """Limpia datos de prueba una sola vez sin eliminar accesos ni perfil comercial."""
     operational_tables = (
+        'purchase_order_items', 'purchase_orders', 'operational_incidents',
         'held_sale_items', 'held_sales', 'quote_items', 'quotes',
         'store_credit_movements', 'store_credit_vouchers',
         'return_loss_requests', 'stock_movements',
@@ -159,6 +181,8 @@ def create_database(database_url=DB_URL):
             'image_path': "VARCHAR(500) DEFAULT ''", 'barcode': "VARCHAR(100) DEFAULT ''",
             'is_temporary': 'BOOLEAN DEFAULT 0', 'category': "VARCHAR(80) DEFAULT 'General'",
             'supplier': "VARCHAR(120) DEFAULT ''", 'minimum_stock': 'INTEGER DEFAULT 5',
+            'wholesale_min_quantity': 'INTEGER DEFAULT 0',
+            'wholesale_price': "TEXT DEFAULT '0.00'",
             'is_active': 'BOOLEAN DEFAULT 1',
             'catalog_visible': 'BOOLEAN DEFAULT 0',
             'catalog_featured': 'BOOLEAN DEFAULT 0',
@@ -182,6 +206,11 @@ def create_database(database_url=DB_URL):
             'receipt_footer': "VARCHAR(500) DEFAULT 'Gracias por su compra.'",
             'return_policy': "VARCHAR(500) DEFAULT ''",
             'brand_color': "VARCHAR(7) DEFAULT '#123B6D'",
+            'app_background_color': "VARCHAR(7) DEFAULT '#F1F3F6'",
+            'app_surface_color': "VARCHAR(7) DEFAULT '#FFFFFF'",
+            'app_text_color': "VARCHAR(7) DEFAULT '#111820'",
+            'document_primary_color': "VARCHAR(7) DEFAULT '#123B6D'",
+            'document_text_color': "VARCHAR(7) DEFAULT '#111820'",
             'logo_data': "TEXT DEFAULT ''",
             'logo_mime': "VARCHAR(40) DEFAULT ''",
         })
@@ -197,6 +226,8 @@ def create_database(database_url=DB_URL):
             'returned_at': 'DATETIME', 'return_reason': "VARCHAR(300) DEFAULT ''",
             'refund_method': "VARCHAR(50) DEFAULT ''",
             'return_disposition': "VARCHAR(30) DEFAULT ''",
+            'register_id': 'INTEGER',
+            'register_name': "VARCHAR(80) DEFAULT 'Caja principal'",
             'customer': "VARCHAR(120) DEFAULT 'Público general'",
         })
         connection.execute(text(
@@ -218,12 +249,48 @@ def create_database(database_url=DB_URL):
             'denomination_details': "TEXT DEFAULT '{}'",
             'source_close_id': 'INTEGER',
             'shift_responsible': "VARCHAR(120) DEFAULT 'Vendedor'",
+            'register_id': 'INTEGER',
+            'register_name': "VARCHAR(80) DEFAULT 'Caja principal'",
         })
-        add_columns(connection, 'cash_movements', {'opening_id': 'INTEGER'})
+        add_columns(connection, 'customers', {
+            'loyalty_points': 'INTEGER DEFAULT 0',
+            'lifetime_spend': "TEXT DEFAULT '0.00'",
+        })
+        add_columns(connection, 'cash_movements', {
+            'opening_id': 'INTEGER',
+            'register_id': 'INTEGER',
+            'register_name': "VARCHAR(80) DEFAULT 'Caja principal'",
+        })
         add_columns(connection, 'cash_closes', {
             'denomination_details': "TEXT DEFAULT '{}'",
             'opening_id': 'INTEGER',
+            'register_id': 'INTEGER',
+            'register_name': "VARCHAR(80) DEFAULT 'Caja principal'",
         })
+        connection.execute(text(
+            "INSERT INTO cash_registers (name, code, location, is_active, created_at) "
+            "SELECT 'Caja principal', 'MAIN', 'Mostrador', 1, :created_at "
+            "WHERE NOT EXISTS (SELECT 1 FROM cash_registers WHERE code = 'MAIN')"),
+            {'created_at': mexico_now()})
+        connection.execute(text(
+            "UPDATE cash_openings SET register_id = (SELECT id FROM cash_registers WHERE code = 'MAIN'), "
+            "register_name = 'Caja principal' WHERE register_id IS NULL"))
+        connection.execute(text(
+            "UPDATE cash_movements SET register_id = (SELECT id FROM cash_registers WHERE code = 'MAIN'), "
+            "register_name = 'Caja principal' WHERE register_id IS NULL"))
+        connection.execute(text(
+            "UPDATE cash_closes SET register_id = (SELECT id FROM cash_registers WHERE code = 'MAIN'), "
+            "register_name = 'Caja principal' WHERE register_id IS NULL"))
+        connection.execute(text(
+            "UPDATE sales SET register_id = (SELECT id FROM cash_registers WHERE code = 'MAIN'), "
+            "register_name = 'Caja principal' WHERE register_id IS NULL"))
+        # ``create_all`` crea las tablas nuevas pero no modifica las existentes.
+        # Las instalaciones anteriores ya tenían órdenes de compra, sin fecha
+        # prevista; conservarlas requiere agregar la columna por migración.
+        add_columns(connection, 'purchase_orders', {
+            'expected_date': 'DATE',
+        })
+        _record_schema_migration(connection, CURRENT_SCHEMA_MIGRATION)
     # Esta versión pública es una demo de Streamlit Community Cloud. La clave de
     # migración garantiza que la limpieza se ejecute una sola vez por despliegue,
     # sin tocar credenciales ni el perfil comercial y sin repetirse en cada rerun.
@@ -235,6 +302,9 @@ def create_database(database_url=DB_URL):
     )
     if demo_reset_requested or community_cloud:
         _clean_demo_operational_data_once(engine)
+    # Este motor sólo se usa para migrar. Liberarlo evita conservar bloqueos de
+    # SQLite cuando el proceso vuelve a comprobar el esquema.
+    engine.dispose()
 
 
 def create_auth_database():
@@ -252,6 +322,8 @@ def create_auth_database():
             'failed_recovery_attempts': 'INTEGER DEFAULT 0',
             'login_blocked_until': 'DATETIME',
             'recovery_blocked_until': 'DATETIME',
+            'is_active': 'BOOLEAN DEFAULT 1',
+            'commission_bps': 'INTEGER DEFAULT 0',
         }
         for field, definition in definitions.items():
             if field not in columns:

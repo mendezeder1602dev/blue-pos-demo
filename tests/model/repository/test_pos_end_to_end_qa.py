@@ -12,7 +12,7 @@ from sqlalchemy.orm import Session
 
 from model.authorization import authorization_context
 from model.entity.models import (
-    Base, CashClose, CashMovement, CashOpening, Product, Sale,
+    Base, CashClose, CashMovement, CashOpening, CreditAccount, Customer, Product, Sale,
     StoreCreditMovement, StoreCreditVoucher,
 )
 from model.repository.cash_close import CashCloseRepository
@@ -127,6 +127,55 @@ class TestPOSEndToEndQA(unittest.TestCase):
         self.session.refresh(product)
         self.assertEqual(product.quantity, 3)
         self.assertEqual(self.session.scalars(select(Sale)).all(), [])
+
+    def test_invalid_credit_data_rolls_back_sale_inventory_and_account(self):
+        product = self.product(price=100.0, quantity=3)
+        with authorization_context('seller'):
+            with self.assertRaises(ValueError):
+                self.sales.insert_transaction(
+                    [(self.sale(product, 'CrÃ©dito'), 1)], actor='Vendedor QA',
+                    credit_account={
+                        'customer': 'Cliente QA', 'total': 100.0,
+                        'due_date': None, 'down_payment': 0,
+                    })
+
+        self.session.refresh(product)
+        self.assertEqual(product.quantity, 3)
+        self.assertEqual(self.session.scalars(select(Sale)).all(), [])
+        self.assertEqual(self.session.scalars(select(CreditAccount)).all(), [])
+
+    def test_credit_sale_requires_registered_customer(self):
+        product = self.product(price=100.0, quantity=3)
+        with self.assertRaisesRegex(ValueError, 'Registra el cliente'):
+            self.sales.insert_transaction(
+                [(self.sale(product, 'Crédito'), 1)], actor='Vendedor QA',
+                credit_account={
+                    'customer': 'Cliente inexistente', 'total': 100.0,
+                    'due_date': mexico_today(), 'down_payment': 0,
+                })
+
+        self.session.refresh(product)
+        self.assertEqual(product.quantity, 3)
+        self.assertEqual(self.session.scalars(select(Sale)).all(), [])
+
+    def test_credit_sale_accepts_active_registered_customer(self):
+        customer = Customer(name='Cliente registrado', phone='9930000000')
+        self.session.add(customer)
+        self.session.commit()
+        product = self.product(price=100.0, quantity=3)
+        sale = self.sale(product, 'Crédito')
+        sale.customer = customer.name
+        inserted = self.sales.insert_transaction(
+            [(sale, 1)], actor='Vendedor QA',
+            credit_account={
+                'customer': customer.name, 'total': 100.0,
+                'due_date': mexico_today(), 'down_payment': 0,
+            })
+
+        self.assertEqual(inserted[0].customer, customer.name)
+        self.assertEqual(
+            self.session.scalars(select(CreditAccount)).one().party_name,
+            customer.name)
 
     def test_old_code_cannot_be_reused_after_rollover(self):
         first = self.product('Producto uno', 100.0)

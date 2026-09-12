@@ -292,6 +292,11 @@ class ProductRepository(RepositoryObserver):
         old.supplier = new.supplier if new.supplier is not None else old.supplier
         old.minimum_stock = (new.minimum_stock if new.minimum_stock is not None
                              else old.minimum_stock)
+        old.wholesale_min_quantity = (new.wholesale_min_quantity
+                                      if new.wholesale_min_quantity is not None
+                                      else old.wholesale_min_quantity)
+        old.wholesale_price = (new.wholesale_price if new.wholesale_price is not None
+                               else old.wholesale_price)
         old.is_active = new.is_active if new.is_active is not None else old.is_active
 
         self.__session.flush()

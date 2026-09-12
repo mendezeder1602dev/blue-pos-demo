@@ -1,6 +1,6 @@
 from sqlalchemy import FLOAT, cast, func, select
 
-from model.entity.models import CashClose
+from model.entity.models import CashClose, CashOpening
 from model.util.monetary_types import CUPMoney
 from model.authorization import require_role
 
@@ -14,6 +14,11 @@ class CashCloseRepository:
         require_role('superuser')
         if cash_close.opening_id is not None and self.get_for_opening(cash_close.opening_id):
             raise ValueError('Este turno ya tiene un cierre de caja.')
+        if cash_close.opening_id is not None:
+            opening = self.__session.get(CashOpening, int(cash_close.opening_id))
+            if opening is not None:
+                cash_close.register_id = opening.register_id
+                cash_close.register_name = opening.register_name
         if not cash_close.cashier.strip():
             raise ValueError('Indica el responsable del corte.')
         money_fields = (

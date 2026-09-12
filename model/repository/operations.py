@@ -1,11 +1,13 @@
 """Casos de uso transversales: Kardex, auditoría, clientes y ventas suspendidas."""
 
 import json
+from datetime import datetime, time, timedelta
 
-from sqlalchemy import select
+from sqlalchemy import or_, select
 
-from model.entity.models import (AuditLog, Customer, HeldSale, HeldSaleItem, Product,
-                                 ReturnLossRequest, Sale, StockMovement)
+from model.entity.models import (AuditLog, Customer, HeldSale, HeldSaleItem,
+                                 OperationalIncident, Product, ReturnLossRequest,
+                                 Sale, StockMovement)
 from model.util.monetary_types import CUPMoney
 from model.authorization import require_role
 from model.timezone import mexico_now
@@ -24,10 +26,37 @@ class OperationsRepository:
         ))
         self.__session.commit()
 
-    def get_audit_logs(self, limit=300):
-        return list(self.__session.scalars(
-            select(AuditLog).order_by(AuditLog.created_at.desc()).limit(limit)
-        ).all())
+    def get_audit_logs(self, limit=300, initial_date=None, final_date=None,
+                       event_types=None, actors=None, entity_types=None, search=''):
+        """Consulta la bitácora sin alterar sus registros.
+
+        Los filtros se aplican en la base de datos para que la auditoría siga siendo
+        útil incluso cuando el historial crece durante la operación del negocio.
+        """
+        statement = select(AuditLog)
+        if initial_date is not None:
+            statement = statement.where(
+                AuditLog.created_at >= datetime.combine(initial_date, time.min))
+        if final_date is not None:
+            statement = statement.where(
+                AuditLog.created_at < datetime.combine(
+                    final_date + timedelta(days=1), time.min))
+        if event_types:
+            statement = statement.where(AuditLog.event_type.in_(event_types))
+        if actors:
+            statement = statement.where(AuditLog.actor.in_(actors))
+        if entity_types:
+            statement = statement.where(AuditLog.entity_type.in_(entity_types))
+        term = (search or '').strip()
+        if term:
+            pattern = f'%{term}%'
+            statement = statement.where(or_(
+                AuditLog.event_type.ilike(pattern), AuditLog.actor.ilike(pattern),
+                AuditLog.entity_type.ilike(pattern), AuditLog.entity_id.ilike(pattern),
+                AuditLog.detail.ilike(pattern),
+            ))
+        statement = statement.order_by(AuditLog.created_at.desc()).limit(int(limit))
+        return list(self.__session.scalars(statement).all())
 
     def adjust_stock(self, product_id, delta, movement_type, reason, actor, reference='',
                      unit_cost=None, update_average_cost=False):
@@ -79,6 +108,68 @@ class OperationsRepository:
         return list(self.__session.scalars(
             select(StockMovement).order_by(StockMovement.created_at.desc()).limit(limit)
         ).all())
+
+    def get_incidents(self, status=None, limit=500):
+        statement = select(OperationalIncident).order_by(
+            OperationalIncident.status.asc(), OperationalIncident.created_at.desc())
+        if status:
+            statement = statement.where(OperationalIncident.status == status)
+        return list(self.__session.scalars(statement.limit(limit)).all())
+
+    def create_incident(self, category, title, detail, priority, actor,
+                        responsible='', source_key=''):
+        require_role('superuser', 'seller')
+        if priority not in ('Crítica', 'Alta', 'Media', 'Informativa'):
+            raise ValueError('Selecciona una prioridad válida.')
+        if len((title or '').strip()) < 4:
+            raise ValueError('Escribe un título de al menos 4 caracteres.')
+        incident = OperationalIncident(
+            source_key=(source_key or '').strip(), category=(category or 'General').strip(),
+            title=title.strip(), detail=(detail or '').strip(), priority=priority,
+            responsible=(responsible or '').strip(), created_by=actor or 'Sistema')
+        self.__session.add(incident)
+        self.__session.flush()
+        self.__session.add(AuditLog(
+            event_type='incidencia_creada', actor=actor or 'Sistema',
+            entity_type='operational_incident', entity_id=str(incident.id),
+            detail=f'{priority} · {incident.category} · {incident.title}'))
+        self.__session.commit()
+        return incident
+
+    def update_incident(self, incident_id, status, responsible, resolution, actor):
+        require_role('superuser')
+        incident = self.__session.get(OperationalIncident, int(incident_id))
+        if incident is None:
+            raise ValueError('La incidencia ya no existe.')
+        if status not in ('Nueva', 'En revisión', 'Resuelta'):
+            raise ValueError('El estado no es válido.')
+        if status == 'Resuelta' and len((resolution or '').strip()) < 5:
+            raise ValueError('Describe la solución antes de cerrar la incidencia.')
+        incident.status = status
+        incident.responsible = (responsible or '').strip()
+        incident.resolution = (resolution or '').strip()
+        incident.updated_at = mexico_now()
+        incident.resolved_at = mexico_now() if status == 'Resuelta' else None
+        self.__session.add(AuditLog(
+            event_type='incidencia_actualizada', actor=actor or 'Administrador',
+            entity_type='operational_incident', entity_id=str(incident.id),
+            detail=f'{incident.title} · {status} · {incident.responsible or "Sin responsable"}'))
+        self.__session.commit()
+        return incident
+
+    def ensure_incident(self, source_key, category, title, detail, priority='Alta'):
+        """Crea una alerta automática sólo si no hay otra abierta con la misma fuente."""
+        incident = self.__session.scalar(select(OperationalIncident).where(
+            OperationalIncident.source_key == source_key,
+            OperationalIncident.status != 'Resuelta'))
+        if incident is not None:
+            incident.detail, incident.priority, incident.updated_at = detail, priority, mexico_now()
+            self.__session.commit()
+            return incident
+        incident = OperationalIncident(
+            source_key=source_key, category=category, title=title, detail=detail,
+            priority=priority, created_by='Sistema')
+        self.__session.add(incident); self.__session.commit(); return incident
 
     def get_return_loss_requests(self, status=None):
         """Lista artículos devueltos retenidos para dictamen de inventario."""
@@ -164,7 +255,7 @@ class OperationsRepository:
             self.__session.commit()
 
     def add_customer(self, name, phone='', email='', tax_id='', notes=''):
-        require_role('superuser')
+        require_role('superuser', 'seller')
         name = (name or '').strip()
         if len(name) < 2:
             raise ValueError('Escribe el nombre del cliente.')
@@ -188,3 +279,36 @@ class OperationsRepository:
         if customer is not None:
             customer.is_active = False
             self.__session.commit()
+
+    def record_customer_purchase(self, customer_name, amount, transaction_id, actor):
+        """Acumula un punto por cada $10 completos; no crea perfiles para público general."""
+        name = (customer_name or '').strip()
+        if not name or name.casefold() in ('público general', 'publico general'):
+            return 0
+        customer = self.__session.scalar(select(Customer).where(Customer.name.ilike(name)))
+        if customer is None:
+            return 0
+        value = max(0.0, round(float(amount), 2))
+        earned = int(value // 10)
+        customer.loyalty_points = int(customer.loyalty_points or 0) + earned
+        customer.lifetime_spend = CUPMoney(
+            f'{float(customer.lifetime_spend.amount if customer.lifetime_spend else 0)+value:.2f}')
+        self.__session.add(AuditLog(
+            event_type='puntos_cliente_acumulados', actor=actor,
+            entity_type='customer', entity_id=str(customer.id),
+            detail=f'{transaction_id} · +{earned} punto(s) · compra ${value:.2f}'))
+        self.__session.commit()
+        return earned
+
+    def adjust_customer_points(self, customer_id, delta, reason, actor):
+        require_role('superuser')
+        customer = self.__session.get(Customer, int(customer_id))
+        if customer is None: raise ValueError('El cliente ya no existe.')
+        resulting = int(customer.loyalty_points or 0) + int(delta)
+        if resulting < 0: raise ValueError('El ajuste dejaría un saldo negativo.')
+        if len((reason or '').strip()) < 4: raise ValueError('Indica el motivo del ajuste.')
+        customer.loyalty_points = resulting
+        self.__session.add(AuditLog(event_type='puntos_cliente_ajustados', actor=actor,
+            entity_type='customer', entity_id=str(customer.id),
+            detail=f'{int(delta):+d} punto(s) · saldo {resulting} · {reason.strip()}'))
+        self.__session.commit(); return customer

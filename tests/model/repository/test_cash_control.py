@@ -91,6 +91,33 @@ class TestCashControlWorkflow(unittest.TestCase):
         self.assertEqual(control.totals_for_date(today, first.id)['Entrada'], 100.0)
         self.assertEqual(control.totals_for_date(today, second.id)['Retiro'], 50.0)
 
+    def test_multiple_registers_can_have_independent_active_shifts(self):
+        control = CashControlRepository(self.session)
+        today = mexico_today()
+        main = control.ensure_default_register()
+        second = control.create_register('Caja 2', 'CAJA-2', 'Mostrador 2', 'superuser')
+
+        first_opening = control.open_day(CashOpening(
+            date=today, opening_amount=CUPMoney('500.00'),
+            cash_limit=CUPMoney('3000.00'), opened_by='Administrador',
+            shift_responsible='Caja principal', register_id=main.id,
+        ), 'superuser')
+        second_opening = control.open_day(CashOpening(
+            date=today, opening_amount=CUPMoney('800.00'),
+            cash_limit=CUPMoney('3000.00'), opened_by='Administrador',
+            shift_responsible='Caja dos', register_id=second.id,
+        ), 'superuser')
+
+        self.assertEqual(control.get_opening(today, main.id).id, first_opening.id)
+        self.assertEqual(control.get_opening(today, second.id).id, second_opening.id)
+        self.assertEqual(len(control.get_openings(today)), 2)
+        with self.assertRaises(ValueError):
+            control.open_day(CashOpening(
+                date=today, opening_amount=CUPMoney('100.00'),
+                cash_limit=CUPMoney('3000.00'), opened_by='Administrador',
+                register_id=main.id,
+            ), 'superuser')
+
 
 if __name__ == '__main__':
     unittest.main()

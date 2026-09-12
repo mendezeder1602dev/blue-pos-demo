@@ -5,7 +5,7 @@ from pathlib import Path
 from sqlalchemy import create_engine, inspect, text
 
 from model.entity.models import Base
-from model.schema import create_database
+from model.schema import CURRENT_SCHEMA_MIGRATION, create_database
 
 
 class CashShiftSchemaMigrationTest(unittest.TestCase):
@@ -38,6 +38,44 @@ class CashShiftSchemaMigrationTest(unittest.TestCase):
                 'opening_id',
                 {column['name'] for column in migrated.get_columns('cash_closes')},
             )
+
+    def test_adds_expected_date_to_existing_purchase_orders(self):
+        with tempfile.TemporaryDirectory() as folder:
+            database_path = Path(folder) / 'legacy-purchase-orders.db'
+            url = f"sqlite:///{database_path.as_posix()}"
+            engine = create_engine(url, future=True)
+            with engine.begin() as connection:
+                connection.execute(text(
+                    'CREATE TABLE purchase_orders ('
+                    'id INTEGER PRIMARY KEY, supplier VARCHAR(120) NOT NULL, '
+                    "status VARCHAR(20) NOT NULL DEFAULT 'Pendiente', "
+                    "total TEXT NOT NULL DEFAULT '0.00', notes VARCHAR(500), "
+                    "created_by VARCHAR(120) NOT NULL DEFAULT 'Administrador', "
+                    'created_at DATETIME, received_at DATETIME)'))
+            engine.dispose()
+
+            create_database(url)
+
+            migrated = inspect(create_engine(url, future=True))
+            self.assertIn(
+                'expected_date',
+                {column['name'] for column in migrated.get_columns('purchase_orders')},
+            )
+
+    def test_records_the_schema_migration(self):
+        with tempfile.TemporaryDirectory() as folder:
+            database_path = Path(folder) / 'versioned.db'
+            url = f"sqlite:///{database_path.as_posix()}"
+            create_database(url)
+
+            engine = create_engine(url, future=True)
+            with engine.connect() as connection:
+                applied = connection.execute(text(
+                    'SELECT COUNT(*) FROM schema_migrations '
+                    'WHERE migration_key = :key'),
+                    {'key': CURRENT_SCHEMA_MIGRATION}).scalar_one()
+            engine.dispose()
+            self.assertEqual(applied, 1)
 
 
 if __name__ == '__main__':

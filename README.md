@@ -22,6 +22,14 @@ producto.
 - Cotizaciones, reportes, estadísticas y auditoría.
 - Catálogo web configurable con los datos del negocio.
 - Perfiles de administrador y vendedor.
+- Centro de notificaciones e incidencias con responsables, prioridad y seguimiento.
+- Crédito a clientes, puntos de lealtad y métricas de desempeño de vendedores.
+- Precios de mayoreo, descuentos autorizados y ventas en espera.
+- Órdenes de compra con recepción, actualización de costos y Kardex.
+- Copias de seguridad automáticas, descarga y restauración validada de SQLite.
+
+Todas estas funciones trabajan de forma local y no requieren APIs ni servicios de
+pago. Las copias automáticas se guardan junto a la base de datos, en `backups/`.
 
 ## Ejecutar localmente en Windows
 
@@ -38,6 +46,22 @@ Después abre `http://localhost:8501` en el navegador.
 
 Las credenciales y códigos privados deben configurarse mediante variables de
 entorno o secretos de Streamlit; no deben guardarse en el repositorio.
+
+## Salida a producción
+
+Antes de operar con ventas reales:
+
+1. Copia [`.env.example`](.env.example) a `.env` en el servidor y configura
+   contraseñas largas que no se reutilicen.
+2. Configura `BLUE_POS_DATABASE_URL` con PostgreSQL administrado. SQLite queda
+   reservado para uso local de una sola caja.
+3. Inicia la aplicación una vez para aplicar y registrar las migraciones en
+   `schema_migrations`; conserva una copia de la base antes de actualizar.
+4. Realiza y verifica una restauración de respaldo antes del primer día de venta.
+5. Simula apertura, venta, devolución, retiro y corte con la impresora y lector
+   de códigos reales.
+
+No actives `BLUE_POS_DEMO_RESET` en producción.
 
 ## Ejecutar pruebas
 
