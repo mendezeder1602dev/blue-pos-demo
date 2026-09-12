@@ -68,8 +68,19 @@ from model.inventory_excel import (
 from model.upload_security import validate_image_upload
 from model.authorization import authorization_context
 from model.repository.catalog import normalize_catalog_slug
-from model.database_utilities import (backup_database_bytes, restore_database_bytes,
-                                      scheduled_backup)
+from model.database_utilities import backup_database_bytes
+
+# Community Cloud puede conservar brevemente una revisión anterior de este módulo
+# durante un despliegue. Las funciones nuevas se ocultan hasta que estén disponibles.
+try:
+    from model.database_utilities import restore_database_bytes
+except ImportError:
+    restore_database_bytes = None
+
+try:
+    from model.database_utilities import scheduled_backup
+except ImportError:
+    scheduled_backup = lambda _database_url: None
 from model.entity.models import CashClose, CashMovement, CashOpening, Expense, Product, Quote, QuoteItem, Sale
 from model.repository.expense import ExpenseFilter
 from model.repository.exc.product import UniqueProductBarcodeException, UniqueProductNameException
@@ -6099,39 +6110,42 @@ def _render_audit():
                     icon=':material/database:', width='stretch')
             except Exception as error:
                 st.error(f'No fue posible preparar el respaldo: {error}')
-            with st.expander('Restaurar respaldo SQLite', icon=':material/restore:'):
-                st.warning(
-                    'La restauración reemplaza los datos operativos actuales. Antes se '
-                    'generará una copia descargable de seguridad.')
-                uploaded_backup = st.file_uploader(
-                    'Archivo de respaldo', type=('db', 'sqlite', 'sqlite3'),
-                    key='restore_database_upload')
-                confirmation = st.text_input(
-                    'Escribe RESTAURAR para confirmar', key='restore_database_confirmation')
-                if st.button('Restaurar datos', type='primary',
-                             disabled=uploaded_backup is None,
-                             key='restore_database_button'):
-                    if confirmation != 'RESTAURAR':
-                        st.error('Escribe RESTAURAR exactamente para continuar.')
-                    else:
-                        try:
-                            safety_copy = backup_database_bytes(
-                                RepositoryFactory.active_database_url())
-                            restore_database_bytes(
-                                RepositoryFactory.active_database_url(),
-                                uploaded_backup.getvalue())
-                            st.session_state['restore_safety_copy'] = safety_copy
-                            RepositoryFactory.close_session()
-                            st.success('Respaldo restaurado. La aplicación recargará los datos.')
-                            st.rerun()
-                        except Exception as error:
-                            st.error(f'No fue posible restaurar: {error}')
-                if st.session_state.get('restore_safety_copy'):
-                    st.download_button(
-                        'Descargar copia previa a la restauración',
-                        st.session_state['restore_safety_copy'],
-                        f'antes-de-restaurar-{mexico_today()}.db',
-                        'application/octet-stream', icon=':material/download:')
+            if restore_database_bytes is None:
+                st.info('La restauración estará disponible cuando termine de actualizarse el servidor.')
+            else:
+                with st.expander('Restaurar respaldo SQLite', icon=':material/restore:'):
+                    st.warning(
+                        'La restauración reemplaza los datos operativos actuales. Antes se '
+                        'generará una copia descargable de seguridad.')
+                    uploaded_backup = st.file_uploader(
+                        'Archivo de respaldo', type=('db', 'sqlite', 'sqlite3'),
+                        key='restore_database_upload')
+                    confirmation = st.text_input(
+                        'Escribe RESTAURAR para confirmar', key='restore_database_confirmation')
+                    if st.button('Restaurar datos', type='primary',
+                                 disabled=uploaded_backup is None,
+                                 key='restore_database_button'):
+                        if confirmation != 'RESTAURAR':
+                            st.error('Escribe RESTAURAR exactamente para continuar.')
+                        else:
+                            try:
+                                safety_copy = backup_database_bytes(
+                                    RepositoryFactory.active_database_url())
+                                restore_database_bytes(
+                                    RepositoryFactory.active_database_url(),
+                                    uploaded_backup.getvalue())
+                                st.session_state['restore_safety_copy'] = safety_copy
+                                RepositoryFactory.close_session()
+                                st.success('Respaldo restaurado. La aplicación recargará los datos.')
+                                st.rerun()
+                            except Exception as error:
+                                st.error(f'No fue posible restaurar: {error}')
+                    if st.session_state.get('restore_safety_copy'):
+                        st.download_button(
+                            'Descargar copia previa a la restauración',
+                            st.session_state['restore_safety_copy'],
+                            f'antes-de-restaurar-{mexico_today()}.db',
+                            'application/octet-stream', icon=':material/download:')
         st.caption('Los reportes PDF y Excel son exportaciones operativas; no sustituyen un respaldo completo.')
 
 
