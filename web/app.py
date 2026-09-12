@@ -90,9 +90,23 @@ from model.repository.sale import SaleFilter
 from model.report.exports import (
     business_as_dict,
     generate_excel_bytes as _generate_excel_bytes,
-    generate_html_bytes as _generate_html_bytes,
     generate_pdf_bytes as _generate_pdf_bytes,
 )
+
+try:
+    from model.report.exports import generate_html_bytes as _generate_html_bytes
+except ImportError:
+    def _generate_html_bytes(_business, title, subtitle, sections):
+        """Exportación HTML básica mientras el servidor completa su actualización."""
+        content = ''.join(
+            f'<h2>{escape(section_title)}</h2><pre>{escape(str(rows))}</pre>'
+            for section_title, rows in sections
+        )
+        return (
+            f'<!doctype html><html lang="es"><meta charset="utf-8">'
+            f'<title>{escape(title)}</title><h1>{escape(title)}</h1>'
+            f'<p>{escape(subtitle)}</p>{content}</html>'
+        ).encode('utf-8')
 from model.report.ticket import generate_thermal_ticket_bytes as _generate_thermal_ticket_bytes
 from model.report.thermal_printer import build_escpos_ticket, print_raw_ticket
 from model.util.monetary_types import CUPMoney
