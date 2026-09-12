@@ -63,7 +63,7 @@ def scheduled_backup(database_url: str, interval_days: int = 7, keep: int = 12):
 
 
 def restore_database_bytes(database_url: str, content: bytes):
-    """Valida un SQLite subido y lo restaura mediante la API de backup."""
+    """Valida y restaura un SQLite subido; se publica junto con la interfaz web."""
     url = make_url(database_url)
     if url.get_backend_name() != 'sqlite' or not url.database:
         raise ValueError('La restauración directa sólo está disponible para SQLite.')
