@@ -415,6 +415,21 @@ def _apply_brand_theme():
         font-size:.82rem; justify-content:flex-start;
     }
     .st-key-eccos-command-actions [data-testid="stHorizontalBlock"] { gap:.5rem; }
+    [class*="st-key-dashboard-kpi-"] [data-testid="stMetricLabel"] p {
+        font-size:.78rem !important; font-weight:700 !important; line-height:1.35;
+    }
+    [class*="st-key-dashboard-kpi-"] [data-testid="stCaptionContainer"] p {
+        font-size:.84rem; font-weight:650; line-height:1.5; color:#4B5563 !important;
+    }
+    [class*="st-key-dashboard-kpi-number-"] [data-testid="stMetricValue"] {
+        width:100%; text-align:right;
+    }
+    [class*="st-key-dashboard-kpi-number-"] [data-testid="stMetricValue"] > div {
+        width:100%; justify-content:flex-end;
+    }
+    [class*="st-key-dashboard-kpi-number-"] [data-testid="stMetricDelta"] {
+        justify-content:flex-end;
+    }
     .eccos-page-jump [data-testid="stSelectbox"] { margin-top:-.15rem; }
     .eccos-next-actions [data-testid="stVerticalBlock"] { gap:.45rem; }
     .eccos-next-actions .stButton > button {
@@ -1026,7 +1041,9 @@ def _dashboard_metric_card(label, value, target, detail, key, delta=None,
                            delta_color='normal', icon=':material/arrow_forward:',
                            callback=None, callback_args=None):
     """Indicador accionable: muestra el dato y abre el detalle relacionado."""
-    with st.container(border=True):
+    value_kind = ('number' if any(
+        character.isdigit() for character in str(value)) else 'text')
+    with st.container(border=True, key=f'dashboard-kpi-{value_kind}-{key}'):
         st.metric(label, value, delta=delta, delta_color=delta_color)
         st.caption(detail)
         st.button(
