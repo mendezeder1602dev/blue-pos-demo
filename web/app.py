@@ -383,30 +383,38 @@ def _apply_brand_theme():
     }
     .eccos-command-center {
         background:linear-gradient(135deg,#07172A 0%,var(--primary) 58%,#1E5A96 100%);
-        border:1px solid rgba(255,255,255,.18); border-radius:18px; padding:18px 20px;
-        margin:0 0 18px; color:#FFFFFF; box-shadow:0 14px 34px rgba(7,23,42,.16);
+        border:1px solid rgba(255,255,255,.18); border-radius:15px; padding:12px 16px;
+        margin:0 0 10px; color:#FFFFFF; box-shadow:0 10px 24px rgba(7,23,42,.13);
     }
     .eccos-command-center small {
-        display:block; color:#BBD2EA; font-size:.68rem; font-weight:850;
-        letter-spacing:.13em; text-transform:uppercase; margin-bottom:3px;
+        display:block; color:#BBD2EA; font-size:.61rem; font-weight:850;
+        letter-spacing:.11em; text-transform:uppercase; margin-bottom:1px;
     }
     .eccos-command-center h2 {
-        color:#FFFFFF !important; margin:0 0 4px !important;
-        font-size:clamp(1.2rem,2.2vw,1.8rem) !important;
+        color:#FFFFFF !important; margin:0 0 2px !important;
+        font-size:clamp(1.1rem,1.8vw,1.45rem) !important; line-height:1.2;
     }
-    .eccos-command-center p { color:#EAF2F8; margin:0; font-size:.88rem; line-height:1.45; }
+    .eccos-command-center p { color:#EAF2F8; margin:0; font-size:.78rem; line-height:1.35; }
     .eccos-system-strip {
-        display:flex; flex-wrap:wrap; gap:8px; margin-top:12px;
+        display:flex; flex-wrap:wrap; gap:6px; margin-top:6px;
     }
     .eccos-system-pill {
-        display:inline-flex; align-items:center; gap:6px; padding:6px 9px;
+        display:inline-flex; align-items:center; gap:5px; padding:3px 7px;
         border:1px solid rgba(255,255,255,.18); border-radius:999px;
-        background:rgba(255,255,255,.09); color:#FFFFFF; font-size:.72rem; font-weight:720;
+        background:rgba(255,255,255,.09); color:#FFFFFF; font-size:.66rem; font-weight:720;
     }
     .eccos-lane-title {
         color:#344054; font-size:.72rem; font-weight:850; letter-spacing:.12em;
-        text-transform:uppercase; margin:.25rem 0 .4rem;
+        text-transform:uppercase; margin:0;
     }
+    .st-key-eccos-command-actions [data-testid="stVerticalBlockBorderWrapper"] {
+        padding:8px 11px;
+    }
+    .st-key-eccos-command-actions [data-testid="stButton"] button {
+        min-height:3rem; padding:.5rem .75rem; border-radius:11px;
+        font-size:.82rem; justify-content:flex-start;
+    }
+    .st-key-eccos-command-actions [data-testid="stHorizontalBlock"] { gap:.5rem; }
     .eccos-page-jump [data-testid="stSelectbox"] { margin-top:-.15rem; }
     .eccos-next-actions [data-testid="stVerticalBlock"] { gap:.45rem; }
     .eccos-next-actions .stButton > button {
@@ -767,42 +775,45 @@ def _render_command_center(user, pages, business_profile):
         f'<p>{escape(display_name)} · {role_label} · {escape(cash_status)}</p>'
         '<div class="eccos-system-strip">'
         f'<span class="eccos-system-pill">Fecha · {mexico_today():%d/%m/%Y}</span>'
-        '<span class="eccos-system-pill">Módulo actual</span>'
-        '<span class="eccos-system-pill">Operación local segura</span>'
+        f'<span class="eccos-system-pill">{escape(current_page)}</span>'
         '</div></section>',
         unsafe_allow_html=True,
     )
 
-    with st.container(border=True):
-        st.markdown('<div class="eccos-lane-title">Acciones rápidas</div>',
-                    unsafe_allow_html=True)
-        action_columns = st.columns(5 if _is_administrator() else 4)
-        for column, (label, target, icon, help_text) in zip(
-                action_columns, _command_action_definitions(_is_administrator())):
-            if target in pages:
-                column.button(
-                    label, icon=icon, width='stretch',
-                    type='primary' if current_page == target else 'secondary',
-                    help=help_text, key=f'command_action_{target}',
-                    on_click=_navigate_to_page, args=(target,))
-        st.markdown('<div class="eccos-lane-title">Buscar módulo</div>',
-                    unsafe_allow_html=True)
-        page_names = list(pages)
-        # El valor del widget es la única fuente de su valor inicial.  No
-        # combine `index` con este estado: Streamlit lo considera un segundo
-        # valor predeterminado y emite una advertencia en cada rerun.
-        if st.session_state.get('command_center_page_jump') != current_page:
-            st.session_state['command_center_page_jump'] = current_page
-        st.selectbox(
-            'Buscar módulo del sistema',
-            page_names,
-            format_func=lambda page: f'{page}',
-            label_visibility='collapsed',
-            key='command_center_page_jump',
-            on_change=_navigate_from_page_jump,
-            args=('command_center_page_jump',),
-            width='stretch',
-        )
+    if current_page == 'Tablero':
+        with st.container(border=True, key='eccos-command-actions'):
+            action_title, module_selector = st.columns(
+                (3, 2), vertical_alignment='center')
+            action_title.markdown(
+                '<div class="eccos-lane-title">Acciones rápidas</div>',
+                unsafe_allow_html=True)
+            page_names = list(pages)
+            # El valor del widget es la única fuente de su valor inicial. No
+            # combine `index` con este estado: Streamlit lo considera un segundo
+            # valor predeterminado y emite una advertencia en cada rerun.
+            if st.session_state.get('command_center_page_jump') != current_page:
+                st.session_state['command_center_page_jump'] = current_page
+            module_selector.selectbox(
+                'Buscar módulo del sistema',
+                page_names,
+                format_func=lambda page: f'{page}',
+                label_visibility='collapsed',
+                key='command_center_page_jump',
+                on_change=_navigate_from_page_jump,
+                args=('command_center_page_jump',),
+                width='stretch',
+            )
+
+            action_columns = st.columns(3, gap='small')
+            actions = _command_action_definitions(_is_administrator())
+            for index, (label, target, icon, help_text) in enumerate(actions):
+                if target in pages:
+                    column = action_columns[index % len(action_columns)]
+                    column.button(
+                        label, icon=icon, width='stretch',
+                        type='secondary', help=help_text,
+                        key=f'command_action_{target}',
+                        on_click=_navigate_to_page, args=(target,))
 
 
 _apply_brand_theme()
