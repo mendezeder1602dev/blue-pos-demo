@@ -12,7 +12,8 @@ from sqlalchemy.orm import Session
 
 from model.authorization import authorization_context
 from model.entity.models import (
-    Base, CashClose, CashMovement, CashOpening, CreditAccount, Customer, Product, Sale,
+    Base, CashClose, CashMovement, CashOpening, CreditAccount, CreditPayment, Customer,
+    Product, Sale,
     StoreCreditMovement, StoreCreditVoucher,
 )
 from model.repository.cash_close import CashCloseRepository
@@ -159,7 +160,9 @@ class TestPOSEndToEndQA(unittest.TestCase):
         self.assertEqual(self.session.scalars(select(Sale)).all(), [])
 
     def test_credit_sale_accepts_active_registered_customer(self):
-        customer = Customer(name='Cliente registrado', phone='9930000000')
+        customer = Customer(
+            name='Cliente registrado', phone='9930000000',
+            address='Av. Principal 123')
         self.session.add(customer)
         self.session.commit()
         product = self.product(price=100.0, quantity=3)
@@ -170,12 +173,53 @@ class TestPOSEndToEndQA(unittest.TestCase):
             credit_account={
                 'customer': customer.name, 'total': 100.0,
                 'due_date': mexico_today(), 'down_payment': 0,
+                'customer_id': customer.id,
             })
 
         self.assertEqual(inserted[0].customer, customer.name)
         self.assertEqual(
             self.session.scalars(select(CreditAccount)).one().party_name,
             customer.name)
+
+    def test_credit_sale_rejects_customer_with_incomplete_contact_data(self):
+        customer = Customer(name='Cliente incompleto', phone='9930000000')
+        self.session.add(customer)
+        self.session.commit()
+        product = self.product(price=100.0, quantity=3)
+
+        with self.assertRaisesRegex(ValueError, 'dirección'):
+            self.sales.insert_transaction(
+                [(self.sale(product, 'Crédito'), 1)], actor='Vendedor QA',
+                credit_account={
+                    'customer': customer.name, 'customer_id': customer.id,
+                    'total': 100.0, 'due_date': mexico_today(), 'down_payment': 0,
+                })
+
+        self.session.refresh(product)
+        self.assertEqual(product.quantity, 3)
+
+    def test_credit_sale_records_initial_payment_and_remaining_balance(self):
+        self.opening()
+        customer = Customer(
+            name='Cliente con enganche', phone='9930000000',
+            address='Av. Principal 123')
+        self.session.add(customer)
+        self.session.commit()
+        product = self.product(price=100.0, quantity=3)
+
+        self.sales.insert_transaction(
+            [(self.sale(product, 'Crédito'), 1)], actor='Vendedor QA',
+            credit_account={
+                'customer': customer.name, 'customer_id': customer.id,
+                'total': 100.0, 'due_date': mexico_today(), 'down_payment': 25.0,
+            })
+
+        account = self.session.scalars(select(CreditAccount)).one()
+        payment = self.session.scalars(select(CreditPayment)).one()
+        self.assertEqual(float(account.initial_payment.amount), 25.0)
+        self.assertEqual(float(account.balance.amount), 75.0)
+        self.assertEqual(float(payment.amount.amount), 25.0)
+        self.assertEqual(payment.reference, 'Enganche inicial')
 
     def test_old_code_cannot_be_reused_after_rollover(self):
         first = self.product('Producto uno', 100.0)
@@ -286,7 +330,15 @@ class TestPOSEndToEndQA(unittest.TestCase):
                 authorized_by='Administrador',
             ), 'superuser', available_cash=None)
 
-    def test_cash_close_repository_enforces_admin_role(self):
+    def test_seller_can_close_an_open_cash_shift(self):
+        opening = self.opening()
+        with authorization_context('seller'):
+            closed = self.closes.insert(CashClose(
+                date=mexico_today(), opening_id=opening.id, cashier='Vendedor'))
+
+        self.assertEqual(closed.opening_id, opening.id)
+
+    def test_cash_close_repository_rejects_unknown_role(self):
         opening = self.opening()
         with authorization_context('store'):
             with self.assertRaises(PermissionError):

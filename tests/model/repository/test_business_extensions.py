@@ -68,10 +68,108 @@ class TestBusinessExtensions(unittest.TestCase):
         repository = OperationsRepository(self.session)
         with authorization_context('seller'):
             customer = repository.add_customer(
-                'Cliente nuevo', '9930000000', 'cliente@example.com', '', 'Alta desde caja')
+                'Cliente nuevo', '9930000000', 'cliente@example.com', '',
+                'Alta desde caja', address='Av. Principal 123')
 
         self.assertEqual(customer.name, 'Cliente nuevo')
-        self.assertEqual(repository.get_customers()[0].phone, '9930000000')
+        self.assertEqual(repository.get_customers()[0].phone, '+529930000000')
+        self.assertEqual(customer.address, 'Av. Principal 123')
+
+    def test_credit_customer_requires_phone_and_address(self):
+        repository = OperationsRepository(self.session)
+        with authorization_context('seller'):
+            with self.assertRaisesRegex(ValueError, 'teléfono'):
+                repository.add_customer(
+                    'Sin teléfono', '', address='Av. Principal 123')
+            with self.assertRaisesRegex(ValueError, 'dirección'):
+                repository.add_customer('Sin dirección', '9930000000')
+
+    def test_customer_fields_reject_values_longer_than_storage_limits(self):
+        repository = OperationsRepository(self.session)
+        with authorization_context('seller'):
+            with self.assertRaisesRegex(ValueError, '120'):
+                repository.add_customer(
+                    'X' * 121, '9930000000', address='Av. Principal 123')
+
+    def test_customer_contact_is_validated_and_normalized_for_selected_country(self):
+        repository = OperationsRepository(self.session)
+        with authorization_context('seller'):
+            customer = repository.add_customer(
+                'Contacto mexicano', '993 123 4567', 'CLIENTE@GMAIL.COM', '', '',
+                address='Av. Principal 123', phone_country='MX', postal_code='86000')
+
+        self.assertEqual(customer.phone, '+529931234567')
+        self.assertEqual(customer.phone_country, 'MX')
+        self.assertEqual(customer.email, 'CLIENTE@gmail.com')
+        self.assertEqual(customer.postal_code, '86000')
+
+    def test_customer_rejects_phone_that_is_invalid_for_selected_country(self):
+        repository = OperationsRepository(self.session)
+        with authorization_context('seller'):
+            with self.assertRaisesRegex(ValueError, 'M\u00e9xico'):
+                repository.add_customer(
+                    'Tel\u00e9fono inv\u00e1lido', '993123456', address='Av. Principal 123',
+                    phone_country='MX')
+
+    def test_customer_uses_phone_and_postal_rules_from_another_country(self):
+        repository = OperationsRepository(self.session)
+        with authorization_context('seller'):
+            customer = repository.add_customer(
+                'Contacto estadounidense', '202-555-0123',
+                address='1600 Pennsylvania Ave', phone_country='US',
+                postal_code='20500')
+
+        self.assertEqual(customer.phone, '+12025550123')
+        self.assertEqual(customer.phone_country, 'US')
+        self.assertEqual(customer.postal_code, '20500')
+
+    def test_customer_rejects_invalid_email_without_persisting_record(self):
+        repository = OperationsRepository(self.session)
+        with authorization_context('seller'):
+            with self.assertRaisesRegex(ValueError, 'correo electr\u00f3nico v\u00e1lido'):
+                repository.add_customer(
+                    'Correo inv\u00e1lido', '9931234567', 'cliente@@correo',
+                    address='Av. Principal 123', phone_country='MX')
+
+        self.assertEqual(repository.get_customers(), [])
+
+    def test_customer_rejects_invalid_postal_code_for_selected_country(self):
+        repository = OperationsRepository(self.session)
+        with authorization_context('seller'):
+            with self.assertRaisesRegex(ValueError, 'c\u00f3digo postal'):
+                repository.add_customer(
+                    'C\u00f3digo inv\u00e1lido', '9931234567', address='Av. Principal 123',
+                    phone_country='MX', postal_code='8600')
+
+    def test_customer_search_matches_contact_and_address_fields(self):
+        repository = OperationsRepository(self.session)
+        with authorization_context('seller'):
+            repository.add_customer(
+                'María López', '9931112233', 'maria@example.com', '', '',
+                address='Colonia Centro 45')
+            repository.add_customer(
+                'Juan Pérez', '9939998877', 'juan@example.com', '', '',
+                address='Fraccionamiento Las Flores')
+
+        self.assertEqual(
+            [customer.name for customer in repository.search_customers('centro')],
+            ['María López'])
+        self.assertEqual(
+            [customer.name for customer in repository.search_customers('9998')],
+            ['Juan Pérez'])
+
+    def test_seller_can_update_customer_contact_before_credit(self):
+        repository = OperationsRepository(self.session)
+        with authorization_context('seller'):
+            customer = repository.add_customer(
+                'Cliente editable', '9930000000', address='Dirección anterior')
+            updated = repository.update_customer(
+                customer.id, 'Cliente editable', '9930000001', 'Dirección actualizada',
+                'cliente@example.com', '', 'Datos confirmados', 'Vendedor QA')
+
+        self.assertEqual(updated.phone, '+529930000001')
+        self.assertEqual(updated.address, 'Dirección actualizada')
+        self.assertEqual(repository.get_audit_logs()[0].event_type, 'cliente_actualizado')
 
     def test_restore_replaces_database_with_valid_copy(self):
         with tempfile.TemporaryDirectory() as folder:

@@ -47,7 +47,9 @@ class Product(Base):
     image_path = Column(String(length=500), nullable=True, default='')
     category = Column(String(length=80), nullable=True, default='General')
     supplier = Column(String(length=120), nullable=True, default='')
+    unit_of_measure = Column(String(length=40), nullable=False, default='Unidad')
     minimum_stock = Column(Integer, nullable=False, default=5)
+    maximum_stock = Column(Integer, nullable=False, default=0)
     wholesale_min_quantity = Column(Integer, nullable=False, default=0)
     wholesale_price = Column(MoneyColumn(), nullable=False, default=CUPMoney('0.00'))
     is_active = Column(Boolean, nullable=False, default=True, index=True)
@@ -347,6 +349,9 @@ class Customer(Base):
     id = Column(Integer, primary_key=True)
     name = Column(String(length=120), nullable=False, unique=True)
     phone = Column(String(length=40), nullable=True, default='')
+    phone_country = Column(String(length=2), nullable=False, default='MX')
+    address = Column(String(length=300), nullable=True, default='')
+    postal_code = Column(String(length=12), nullable=True, default='')
     email = Column(String(length=120), nullable=True, default='')
     tax_id = Column(String(length=40), nullable=True, default='')
     notes = Column(String(length=400), nullable=True, default='')
@@ -354,6 +359,7 @@ class Customer(Base):
     loyalty_points = Column(Integer, nullable=False, default=0)
     lifetime_spend = Column(MoneyColumn(), nullable=False, default=CUPMoney('0.00'))
     created_at = Column(DateTime, nullable=False, default=mexico_now)
+    updated_at = Column(DateTime, nullable=False, default=mexico_now)
 
 
 class CashRegister(Base):
@@ -451,7 +457,9 @@ class BusinessProfile(Base):
     postal_code = Column(String(length=12), nullable=True, default='')
     tax_regime = Column(String(length=160), nullable=True, default='')
     receipt_header = Column(String(length=300), nullable=True, default='')
+    ticket_prefix = Column(String(length=12), nullable=True, default='V')
     receipt_footer = Column(String(length=500), nullable=True, default='Gracias por su compra.')
+    enabled_payment_methods = Column(Text, nullable=True, default='')
     return_policy = Column(String(length=500), nullable=True, default='')
     brand_color = Column(String(length=7), nullable=True, default='#123B6D')
     app_background_color = Column(String(length=7), nullable=True, default='#F1F3F6')

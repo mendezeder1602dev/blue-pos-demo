@@ -24,6 +24,7 @@ import re
 from datetime import date, datetime, timedelta
 from html import escape
 from types import SimpleNamespace
+from unicodedata import combining as unicode_combining, normalize as unicode_normalize
 from urllib.parse import quote
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -44,6 +45,9 @@ except FileNotFoundError:
     pass
 
 from model import economy, schema
+from model.customer_contact import (
+    country_label, country_options, national_phone_value, phone_length_hint,
+)
 from model.color_safety import (
     DEFAULT_APP_BACKGROUND,
     DEFAULT_APP_SURFACE,
@@ -114,6 +118,11 @@ from model.timezone import mexico_now, mexico_today
 
 LOW_STOCK_THRESHOLD = 5
 PAYMENT_METHODS = ('Efectivo', 'Transferencia', 'Tarjeta', 'Crédito', 'Mixto', 'Vale')
+UNIT_OF_MEASURE_OPTIONS = (
+    'Unidad', 'Pieza', 'Par', 'Paquete', 'Caja', 'Bolsa', 'Botella', 'Lata',
+    'Kilogramo (kg)', 'Gramo (g)', 'Litro (L)', 'Mililitro (ml)', 'Metro (m)',
+    'Centímetro (cm)', 'Servicio', 'Otro',
+)
 MONTH_NAMES = ('', 'Enero', 'Febrero', 'Marzo', 'Abril', 'Mayo', 'Junio',
                'Julio', 'Agosto', 'Septiembre', 'Octubre', 'Noviembre', 'Diciembre')
 DESCRIPTION_LABEL = 'Descripción'
@@ -133,7 +142,7 @@ CASH_DENOMINATIONS = (
     ('coin_1', 'Moneda mexicana · 1 MXN', 1.0),
     ('coin_050', 'Moneda mexicana · 0.50 MXN', .5),
 )
-WORKSPACE_SCHEMA_VERSION = 8
+WORKSPACE_SCHEMA_VERSION = 11
 
 
 @st.cache_data(ttl='10m', max_entries=48, show_spinner=False)
@@ -216,9 +225,34 @@ def _mxn(value):
     return f'${float(value):,.2f} {CURRENCY_CODE}'
 
 
+def _search_text(value):
+    """Normaliza texto de catálogo para búsquedas tolerantes a acentos."""
+    normalized = unicode_normalize('NFKD', str(value or '').casefold())
+    return ''.join(character for character in normalized if not unicode_combining(character))
+
+
+def _catalog_search_rank(product, search_terms):
+    """Da prioridad a nombres que comienzan con el texto capturado."""
+    if not search_terms:
+        return 0
+    name = _search_text(product.name)
+    query = ' '.join(search_terms)
+    if name == query:
+        return 0
+    if name.startswith(query):
+        return 1
+    if any(word.startswith(search_terms[0]) for word in name.split()):
+        return 2
+    return 3
+
+
 def _sale_folio(sale_id):
     """Folio comercial corto; el identificador interno nunca se muestra al cliente."""
-    return f'V-{int(sale_id):06d}'
+    prefix = getattr(
+        RepositoryFactory.get_business_profile_repository().get_profile(),
+        'ticket_prefix', 'V') or 'V'
+    prefix = re.sub(r'[^A-Za-z0-9]+', '', prefix).upper()[:12] or 'V'
+    return f'{prefix}-{int(sale_id):06d}'
 
 
 def _sale_register_folio(sale):
@@ -278,6 +312,17 @@ def _apply_brand_theme():
     .sidebar-user-role { color:#9FB0C3; font-size:.7rem; font-weight:650; }
     .sidebar-section-label { color:#7F95AB; font-size:.65rem; font-weight:850;
         letter-spacing:.11em; margin:.85rem 0 .28rem; text-transform:uppercase; }
+    [data-testid="stSidebar"] .stButton > button {
+        justify-content:flex-start !important; text-align:left !important;
+        gap:.58rem !important; padding:.42rem .72rem !important;
+    }
+    [data-testid="stSidebar"] .stButton > button [data-testid="stMarkdownContainer"],
+    [data-testid="stSidebar"] .stButton > button [data-testid="stMarkdownContainer"] p {
+        width:100%; text-align:left !important;
+    }
+    [data-testid="stSidebar"] .stButton > button svg {
+        flex:0 0 auto; width:1.12rem; height:1.12rem;
+    }
     [class*="st-key-nav_"] button { min-height:38px !important;
         justify-content:flex-start !important; text-align:left !important;
         padding:.4rem .7rem !important; border-color:transparent !important; }
@@ -295,6 +340,21 @@ def _apply_brand_theme():
     [class*="st-key-sidebar_utility_"] button [data-testid="stMarkdownContainer"],
     [class*="st-key-sidebar_utility_"] button [data-testid="stMarkdownContainer"] p {
         text-align:left !important; }
+    .st-key-sidebar_utility_settings button[kind="secondary"] {
+        background:#17304B !important; border-color:#3D5D7E !important;
+        box-shadow:inset 3px 0 0 #6E9AC8 !important;
+    }
+    .st-key-sidebar_utility_settings button[kind="secondary"]:hover {
+        background:#1D3B5C !important; border-color:#6E9AC8 !important;
+    }
+    [data-testid="stSidebar"] .st-key-sidebar_utility_settings
+    button[kind="secondary"] p,
+    [data-testid="stSidebar"] .st-key-sidebar_utility_settings
+    button[kind="secondary"] span,
+    [data-testid="stSidebar"] .st-key-sidebar_utility_settings
+    button[kind="secondary"] svg {
+        color:#F8FAFC !important; fill:currentColor !important;
+    }
     [data-testid="stSidebar"] [data-testid="stExpander"] { background:#0B1727 !important;
         border-color:#263A52 !important; box-shadow:none; }
     [data-testid="stSidebar"] [data-testid="stExpander"] summary p {
@@ -615,18 +675,23 @@ def _render_activity_notice():
     if not notice:
         return
     title = notice['title']
-    message = (
-        f'**{title}**  \n{notice["detail"]}  \n'
-        f'**Responsable:** {notice.get("actor", "Sistema")} · '
-        f'**Fecha y hora:** {notice.get("created_at", "")}'
-    )
     renderer = {
         'success': st.success,
         'warning': st.warning,
         'error': st.error,
         'info': st.info,
     }.get(notice.get('tone'), st.success)
-    renderer(message, icon=notice.get('icon'))
+
+    # Keep the result visible at the top of the next screen, instead of
+    # relying only on the short-lived toast notification.
+    with st.container(border=True):
+        st.caption('RESULTADO DE LA ÚLTIMA ACCIÓN')
+        st.subheader(f'{notice.get("icon", ":material/info:")} {title}')
+        renderer(notice['detail'], icon=notice.get('icon'))
+        st.caption(
+            f'Responsable: {notice.get("actor", "Sistema")}  ·  '
+            f'{notice.get("created_at", "")}'
+        )
     st.toast(title, icon=notice.get('icon'))
 
 
@@ -723,11 +788,14 @@ def _render_command_center(user, pages, business_profile):
         st.markdown('<div class="eccos-lane-title">Buscar módulo</div>',
                     unsafe_allow_html=True)
         page_names = list(pages)
-        st.session_state.setdefault('command_center_page_jump', current_page)
+        # El valor del widget es la única fuente de su valor inicial.  No
+        # combine `index` con este estado: Streamlit lo considera un segundo
+        # valor predeterminado y emite una advertencia en cada rerun.
+        if st.session_state.get('command_center_page_jump') != current_page:
+            st.session_state['command_center_page_jump'] = current_page
         st.selectbox(
             'Buscar módulo del sistema',
             page_names,
-            index=page_names.index(current_page) if current_page in page_names else 0,
             format_func=lambda page: f'{page}',
             label_visibility='collapsed',
             key='command_center_page_jump',
@@ -937,7 +1005,9 @@ def _inventory_export_rows(products):
         'Costo': float(product.cost.amount),
         'Categoría': product.category or 'General',
         'Proveedor': product.supplier or '',
+        'Unidad de medida': getattr(product, 'unit_of_measure', 'Unidad') or 'Unidad',
         'Existencia mínima': product.minimum_stock or LOW_STOCK_THRESHOLD,
+        'Existencia máxima': getattr(product, 'maximum_stock', 0) or '',
     } for product in products]
 
 
@@ -958,6 +1028,207 @@ def _dashboard_sales_detail_card(label, value, detail, key, delta=None):
     _dashboard_metric_card(
         label, value, 'Ventas', detail, key, delta=delta,
         icon=':material/receipt_long:', callback=_open_sales_history, callback_args=())
+
+
+def _render_statistics_weekly_pulse(today):
+    """Muestra tendencia reciente con una sola agregación SQL y métricas accionables."""
+    initial_date = today - timedelta(days=6)
+    daily_trend = RepositoryFactory.get_economic_summary_repository().get_daily_trend(
+        initial_date, today)
+    rows = []
+    for offset in range(7):
+        current_day = initial_date + timedelta(days=offset)
+        values = daily_trend.get(current_day, {
+            'sales': 0.0, 'cost': 0.0, 'expenses': 0.0, 'tickets': 0,
+        })
+        rows.append({
+            'Día': current_day.strftime('%a %d'),
+            'Ventas (MXN)': values['sales'],
+            'Utilidad neta (MXN)': values['sales'] - values['cost'] - values['expenses'],
+            'Tickets': values['tickets'],
+        })
+    trend_frame = pd.DataFrame(rows).set_index('Día')
+    total_sales = trend_frame['Ventas (MXN)'].sum()
+    total_tickets = int(trend_frame['Tickets'].sum())
+    active_days = int((trend_frame['Tickets'] > 0).sum())
+
+    with st.container(border=True):
+        st.subheader('Pulso de los últimos 7 días')
+        st.caption('Detecta si bajan las ventas o los tickets antes de que afecten el cierre.')
+        metrics = st.columns(3)
+        metrics[0].metric('Ventas del periodo', _mxn(total_sales))
+        metrics[1].metric('Tickets del periodo', total_tickets)
+        metrics[2].metric('Días con actividad', f'{active_days}/7')
+        st.line_chart(trend_frame[['Ventas (MXN)', 'Utilidad neta (MXN)']])
+        st.bar_chart(trend_frame[['Tickets']])
+        st.caption('Importes en MXN. La utilidad neta descuenta costo de mercancía y gastos registrados.')
+
+
+def _render_dashboard_compact_experiment():
+    """Centro diario compacto: estado, siguiente acción y excepciones reales."""
+    today = mexico_today()
+    summary = RepositoryFactory.get_economic_summary_repository().get_economic_summary_on_day(today)
+    today_summary = _summary_for_range(today, today)
+    products = [
+        product for product in RepositoryFactory.get_product_repository().get_all_products()
+        if not product.is_temporary
+    ]
+    sale_count = today_summary['sale_quantity']
+    sales_total = float(summary.acquired_money.amount)
+    average_ticket = sales_total / max(1, sale_count)
+
+    _hero('Tu negocio hoy', 'Lo importante para operar y decidir, sin información innecesaria.',
+          'RESUMEN · ACCIONES')
+
+    with st.container(horizontal=True):
+        st.metric('Ventas', _mxn(sales_total), border=True)
+        st.metric('Tickets', sale_count, border=True)
+        st.metric('Ticket promedio', _mxn(average_ticket), border=True)
+        st.metric('Utilidad neta', _mxn(summary.net_profit.amount), border=True)
+
+    is_admin = _is_administrator()
+    available_pages = ADMIN_PAGES if is_admin else SELLER_PAGES
+    sale_target = 'Ventas' if is_admin else 'Nueva venta'
+    alerts = []
+    health_score = 100
+    opening = None
+    estimated_cash = 0.0
+    cash_limit = 0.0
+
+    low_stock = [
+        product for product in products
+        if 0 < product.quantity <= (product.minimum_stock or LOW_STOCK_THRESHOLD)
+    ]
+    out_of_stock = [product for product in products if product.quantity <= 0]
+    if not products:
+        alerts.append(('warning', 'Inventario vacío',
+                       'Registra productos para comenzar a vender.', 'Inventario',
+                       ':material/add_box:'))
+        health_score -= 25
+    elif out_of_stock:
+        alerts.append(('error', 'Productos agotados',
+                       f'{len(out_of_stock)} producto(s) no pueden venderse.', 'Inventario',
+                       ':material/inventory_2:'))
+        health_score -= min(25, len(out_of_stock) * 8)
+    if low_stock:
+        alerts.append(('warning', 'Existencias bajas',
+                       f'{len(low_stock)} producto(s) requieren compra.', 'Abastecimiento',
+                       ':material/local_shipping:'))
+        health_score -= min(20, len(low_stock) * 4)
+
+    if is_admin:
+        credit_summary = RepositoryFactory.get_credit_account_repository().summary()
+        overdue_count = len(credit_summary['overdue'])
+        if overdue_count:
+            alerts.append(('error', 'Cobranza vencida',
+                           f'{overdue_count} cuenta(s) necesitan seguimiento.',
+                           'Créditos y cartera', ':material/account_balance_wallet:'))
+            health_score -= min(20, overdue_count * 7)
+        cash = RepositoryFactory.get_cash_control_repository()
+        opening = cash.get_opening(today)
+        if opening:
+            grouped_sales = {}
+            for sale in today_summary['sales']:
+                if sale.status == 'Completada':
+                    grouped_sales.setdefault(
+                        sale.transaction_id or f'legacy-{sale.id}', []).append(sale)
+            cash_sales = sum(
+                _payment_breakdown(
+                    transaction[0].payment_method, transaction[0].payment_details,
+                    sum(float(sale.price.amount) for sale in transaction))['Efectivo']
+                for transaction in grouped_sales.values())
+            movements = cash.totals_for_date(today, opening.id)
+            estimated_cash = (float(opening.opening_amount.amount) + cash_sales
+                              + movements['Entrada'] - movements['Retiro'])
+            cash_limit = float(opening.cash_limit.amount)
+            if estimated_cash > cash_limit:
+                alerts.append(('error', 'Caja sobre el límite',
+                               f'Retira o concilia {_mxn(estimated_cash - cash_limit)}.',
+                               'Corte de caja', ':material/point_of_sale:'))
+                health_score -= 15
+        else:
+            alerts.insert(0, ('warning', 'Caja sin abrir',
+                              'Abre el turno antes de comenzar a cobrar.',
+                              'Apertura de caja', ':material/lock_open:'))
+
+    health_score = max(0, health_score)
+    alert_signature = tuple((tone, title, detail) for tone, title, detail, *_ in alerts)
+    if alerts and st.session_state.get('_dashboard_alert_signature') != alert_signature:
+        highest = next((alert for alert in alerts if alert[0] == 'error'), alerts[0])
+        _, alert_title, alert_detail, _, alert_icon = highest
+        st.toast(f'{alert_title} · {alert_detail}', icon=alert_icon)
+        st.session_state['_dashboard_alert_signature'] = alert_signature
+
+    action_panel, status_panel = st.columns((3, 2), vertical_alignment='top')
+    with action_panel.container(border=True):
+        st.subheader('Siguiente acción', anchor=False)
+        if is_admin and opening is None:
+            st.warning('Primero abre la caja para llevar un control correcto del turno.',
+                       icon=':material/lock_open:')
+            st.button('Abrir caja', type='primary', icon=':material/lock_open:',
+                      width='stretch', key='dashboard_guided_open_cash',
+                      on_click=_navigate_to_page, args=('Apertura de caja',))
+        elif alerts:
+            _, title, detail, target, icon = alerts[0]
+            st.markdown(f'**{title}**')
+            st.caption(detail)
+            if target in available_pages:
+                st.button('Resolver ahora', type='primary', icon=icon, width='stretch',
+                          key='dashboard_resolve_first_alert',
+                          on_click=_navigate_to_page, args=(target,))
+        else:
+            st.success('Todo está en orden. Puedes continuar vendiendo.',
+                       icon=':material/check_circle:')
+            st.button('Nueva venta', type='primary', icon=':material/point_of_sale:',
+                      width='stretch', key='dashboard_guided_sale',
+                      on_click=_navigate_to_page, args=(sale_target,))
+        with st.container(horizontal=True):
+            st.button('Nueva venta', icon=':material/point_of_sale:',
+                      key='dashboard_action_sale', on_click=_navigate_to_page,
+                      args=(sale_target,))
+            if 'Clientes' in available_pages:
+                st.button('Nuevo cliente', icon=':material/person_add:',
+                          key='dashboard_action_customer', on_click=_navigate_to_page,
+                          args=('Clientes',))
+            if 'Movimientos recientes' in available_pages:
+                st.button('Últimos movimientos', icon=':material/receipt_long:',
+                          key='dashboard_action_history', on_click=_navigate_to_page,
+                          args=('Movimientos recientes',))
+
+    with status_panel.container(border=True):
+        st.subheader('Estado operativo', anchor=False)
+        tone = 'green' if health_score >= 85 else ('orange' if health_score >= 65 else 'red')
+        label = ('Estable' if health_score >= 85 else
+                 'Requiere atención' if health_score >= 65 else 'Prioritario')
+        st.badge(label, color=tone, icon=':material/health_and_safety:')
+        st.metric('Salud del negocio', f'{health_score}/100')
+        st.progress(health_score / 100, text=f'{len(alerts)} alerta(s) activa(s)')
+        if is_admin:
+            cash_text = (f'Caja abierta · {_mxn(estimated_cash)} estimados'
+                         if opening else 'Caja cerrada')
+            st.caption(cash_text)
+            st.button('Ver diagnóstico', icon=':material/monitoring:', width='stretch',
+                      key='dashboard_health_detail', on_click=_navigate_to_page,
+                      args=('Salud operativa',))
+
+    with st.container(border=True):
+        heading = st.container(horizontal=True, horizontal_alignment='distribute',
+                               vertical_alignment='center')
+        heading.subheader('Requiere tu atención', anchor=False)
+        heading.caption('Sólo aparecen situaciones que necesitan una decisión.')
+        if not alerts:
+            st.success('Sin pendientes críticos por ahora.', icon=':material/task_alt:')
+        else:
+            for index, (tone, title, detail, target, icon) in enumerate(alerts):
+                row = st.container(horizontal=True, vertical_alignment='center', border=True)
+                if tone == 'error':
+                    row.error(f'**{title}** · {detail}', icon=icon)
+                else:
+                    row.warning(f'**{title}** · {detail}', icon=icon)
+                if target in available_pages:
+                    row.button('Atender', icon=':material/arrow_forward:',
+                               key=f'dashboard_alert_{index}',
+                               on_click=_navigate_to_page, args=(target,))
 
 
 def _render_dashboard():
@@ -1142,13 +1413,20 @@ def _render_dashboard():
                            / float(product.price.amount)) < .10]
         cash_over_limit = bool(opening and estimated_cash > limit)
         overdue_credit_count = len(credit_summary['overdue'])
-        health_penalties = (
-            min(25, len(out_of_stock) * 8)
-            + min(20, len(low_stock) * 4)
-            + min(20, len(low_margin) * 5)
-            + min(20, overdue_credit_count * 7)
-            + (15 if cash_over_limit else 0)
+        health_factors = (
+            ('Productos agotados', len(out_of_stock), 8, 25, 'Inventario',
+             'Cada producto sin existencia resta 8 puntos; máximo 25.'),
+            ('Existencias bajas', len(low_stock), 4, 20, 'Abastecimiento',
+             'Cada producto en o bajo su mínimo resta 4 puntos; máximo 20.'),
+            ('Margen bajo', len(low_margin), 5, 20, 'Reportes',
+             'Cada producto con margen menor a 10 % resta 5 puntos; máximo 20.'),
+            ('Créditos vencidos', overdue_credit_count, 7, 20, 'Créditos y cartera',
+             'Cada cuenta vencida resta 7 puntos; máximo 20.'),
+            ('Caja sobre límite', int(cash_over_limit), 15, 15, 'Corte de caja',
+             'Se restan 15 puntos si el efectivo estimado supera el límite de caja.'),
         )
+        health_penalties = sum(min(cap, count * points)
+                               for _, count, points, cap, _, _ in health_factors)
         health_score = max(0, 100 - health_penalties)
         if health_score >= 85:
             health_label, health_tone = 'Negocio estable', 'success'
@@ -1170,16 +1448,12 @@ def _render_dashboard():
         if not recommended_actions:
             recommended_actions.append('Mantener operación y revisar reportes al cierre.')
         with st.container(border=True):
-            st.subheader('Salud operativa del negocio')
+            st.subheader('Salud operativa')
             st.metric('Puntaje ECCOS', f'{health_score}/100', delta=health_label)
-            st.progress(health_score / 100)
-            getattr(st, health_tone)(
-                ' · '.join(recommended_actions[:2]),
-                icon=':material/health_and_safety:')
-            with st.expander('Ver plan de acción recomendado',
-                             icon=':material/checklist:'):
-                for action in recommended_actions:
-                    st.markdown(f'- {action}')
+            st.caption('Abre el diagnóstico independiente para conocer la fórmula, riesgos y acciones.')
+            st.button('Abrir salud operativa', type='primary', icon=':material/health_and_safety:',
+                      key='dashboard_open_business_health', on_click=_navigate_to_page,
+                      args=('Salud operativa',))
         with st.container(border=True):
             st.subheader('Atención operativa')
             st.caption('Prioridades que requieren acción antes de cerrar la jornada.')
@@ -1287,6 +1561,91 @@ def _render_dashboard():
 # Ventas
 # ---------------------------------------------------------------------------
 
+def _render_business_health():
+    _hero('Salud operativa del negocio',
+          'Diagnóstico independiente de riesgos de inventario, margen, cobranza y caja.',
+          'ANÁLISIS · SALUD OPERATIVA')
+    products = [product for product in RepositoryFactory.get_product_repository().get_all_products()
+                if not product.is_temporary]
+    low_stock = [product for product in products if 0 < product.quantity <= (
+        product.minimum_stock or LOW_STOCK_THRESHOLD)]
+    out_of_stock = [product for product in products if product.quantity <= 0]
+    low_margin = [product for product in products if float(product.price.amount) > 0 and (
+        float(product.price.amount) - float(product.cost.amount)) / float(product.price.amount) < .10]
+    overdue = RepositoryFactory.get_credit_account_repository().summary()['overdue']
+    cash_control = RepositoryFactory.get_cash_control_repository()
+    opening = cash_control.get_opening(mexico_today())
+    cash_over_limit = False
+    estimated_cash = 0.0
+    cash_limit = 0.0
+    if opening:
+        today_sales = _summary_for_range(mexico_today(), mexico_today())['sales']
+        grouped_sales = {}
+        for sale in today_sales:
+            if sale.status == 'Completada':
+                grouped_sales.setdefault(sale.transaction_id or f'legacy-{sale.id}', []).append(sale)
+        cash_sales = sum(
+            _payment_breakdown(
+                transaction[0].payment_method, transaction[0].payment_details,
+                sum(float(sale.price.amount) for sale in transaction))['Efectivo']
+            for transaction in grouped_sales.values())
+        movements = cash_control.totals_for_date(mexico_today(), opening.id)
+        estimated_cash = (float(opening.opening_amount.amount) + cash_sales
+                          + movements['Entrada'] - movements['Retiro'])
+        cash_limit = float(opening.cash_limit.amount)
+        cash_over_limit = estimated_cash > cash_limit
+    factors = (
+        ('Productos agotados', len(out_of_stock), 8, 25, 'Inventario',
+         'Cada producto agotado resta 8 puntos.'),
+        ('Existencias bajas', len(low_stock), 4, 20, 'Abastecimiento',
+         'Cada producto en o bajo su mínimo resta 4 puntos.'),
+        ('Margen bajo', len(low_margin), 5, 20, 'Reportes',
+         'Cada producto con margen menor a 10 % resta 5 puntos.'),
+        ('Créditos vencidos', len(overdue), 7, 20, 'Créditos y cartera',
+         'Cada crédito vencido resta 7 puntos.'),
+        ('Caja sobre límite', int(cash_over_limit), 15, 15, 'Corte de caja',
+         'Se restan 15 puntos si el efectivo proyectado supera el límite configurado.'),
+    )
+    penalty = sum(min(cap, count * points) for _, count, points, cap, _, _ in factors)
+    score = max(0, 100 - penalty)
+    label = 'Negocio estable' if score >= 85 else ('Requiere seguimiento' if score >= 65 else 'Atención prioritaria')
+    st.metric('Puntaje ECCOS', f'{score}/100', delta=label, border=True)
+    st.progress(score / 100, text=f'100 − {penalty} puntos de riesgo = {score}/100')
+    st.info('Este indicador no mide ventas; muestra riesgos que pueden afectar caja, inventario o utilidad.',
+            icon=':material/info:')
+    if opening:
+        st.caption(
+            'Efectivo proyectado = fondo inicial + cobros en efectivo + entradas '
+            'autorizadas − retiros autorizados.')
+        st.metric(
+            'Efectivo proyectado del turno', _mxn(estimated_cash),
+            delta=(f'Límite: {_mxn(cash_limit)}'), border=True)
+    for index, (title, count, points, cap, target, reason) in enumerate(factors, start=1):
+        impact = min(cap, count * points)
+        with st.container(border=True):
+            columns = st.columns((2, 1, 1))
+            columns[0].markdown(f'### {title}\n{reason} Máximo: **-{cap} puntos**.')
+            columns[1].metric('Detectados', count)
+            columns[2].metric('Descuento', f'-{impact} pts')
+            with st.expander('Ver cómo se calculó', icon=':material/calculate:'):
+                st.write(f'Fórmula: `min({cap}, {count} × {points}) = {impact}` puntos.')
+                if title == 'Caja sobre límite' and opening:
+                    st.write(
+                        f'Efectivo proyectado: {_mxn(estimated_cash)}; '
+                        f'límite: {_mxn(cash_limit)}.')
+                elif title == 'Margen bajo':
+                    st.write('Margen por producto = `(precio − costo) / precio`. Se marca cuando es menor a 10 %.')
+                elif title == 'Existencias bajas':
+                    st.write('Se marca cuando la existencia es mayor que cero y no supera su mínimo configurado.')
+                elif title == 'Productos agotados':
+                    st.write('Se marca cuando la existencia es cero o menor.')
+                else:
+                    st.write('Se marca cada cuenta con saldo vencido según su fecha de vencimiento.')
+            if count:
+                st.button(f'Revisar {title.lower()}', icon=':material/arrow_forward:',
+                          key=f'business_health_{index}', on_click=_navigate_to_page, args=(target,))
+
+
 def _render_seller_dashboard():
     _hero('Mi jornada', 'Ventas, turno y actividad personal de hoy.', 'VENDEDOR · OPERACIÓN')
     actor = _actor_name()
@@ -1331,6 +1690,18 @@ def _render_seller_dashboard():
     else:
         st.info('Aún no has registrado ventas en esta jornada.')
 
+def _enabled_payment_methods():
+    """Métodos habilitados por administración, con una configuración segura por defecto."""
+    configured = getattr(
+        RepositoryFactory.get_business_profile_repository().get_profile(),
+        'enabled_payment_methods', '') or ''
+    try:
+        selected = tuple(method for method in json.loads(configured) if method in PAYMENT_METHODS)
+    except (TypeError, ValueError, json.JSONDecodeError):
+        selected = ()
+    return selected or PAYMENT_METHODS
+
+
 def _payment_breakdown(payment_method, payment_details, total):
     """Distribuye un cobro entre métodos para reportes y cortes de caja."""
     amount = max(0.0, float(total))
@@ -1371,12 +1742,128 @@ def _payment_breakdown(payment_method, payment_details, total):
     return breakdown
 
 
+def _customer_contact_form_fields(prefix, customer=None):
+    """Campos compactos y consistentes para todas las fichas de cliente."""
+    options = country_options()
+    current_country = (getattr(customer, 'phone_country', '') or 'MX').upper()
+    if current_country not in options:
+        current_country = 'MX'
+    contact = st.columns((1.15, 1.25, 1.6))
+    phone_country = contact[0].selectbox(
+        'País y lada *', options, index=options.index(current_country),
+        format_func=country_label, key=f'{prefix}_phone_country')
+    phone = contact[1].text_input(
+        'Teléfono *',
+        value=national_phone_value(
+            getattr(customer, 'phone', '') or '', current_country),
+        placeholder='Número nacional', icon=':material/call:',
+        help=(f'Se validará como {country_label(phone_country)}. '
+              f'Referencia: {phone_length_hint(phone_country)}.'),
+        key=f'{prefix}_phone')
+    email = contact[2].text_input(
+        'Correo electrónico', value=getattr(customer, 'email', '') or '',
+        placeholder='nombre@dominio.com', icon=':material/mail:',
+        help='Opcional. Si lo capturas, debe tener un formato de correo válido.',
+        key=f'{prefix}_email')
+    location = st.columns((3, 1))
+    address = location[0].text_area(
+        'Domicilio *', value=getattr(customer, 'address', '') or '',
+        placeholder='Calle, número, colonia, localidad y referencias', height=90,
+        key=f'{prefix}_address')
+    postal_code = location[1].text_input(
+        'Código postal', value=getattr(customer, 'postal_code', '') or '',
+        placeholder='Opcional', icon=':material/location_on:',
+        help='Se valida de acuerdo con el país seleccionado.',
+        key=f'{prefix}_postal_code')
+    return phone, phone_country, email, address, postal_code
+
+
+@st.dialog('Confirma los datos del cliente', icon=':material/person_check:', width='large')
+def _credit_customer_confirmation_dialog(prefix, customer_id):
+    """Confirma o corrige la ficha sin extender el formulario de cobro."""
+    operations = RepositoryFactory.get_operations_repository()
+    customer = next(
+        (item for item in operations.get_customers() if item.id == customer_id), None)
+    if customer is None:
+        st.error('El cliente ya no está disponible.', icon=':material/error:')
+        return
+    st.caption(
+        'Revisa los datos de contacto. Al confirmar, el crédito quedará autorizado '
+        'para este cliente.')
+    with st.form(f'{prefix}_credit_customer_confirmation_form', enter_to_submit=False):
+        name = st.text_input('Cliente', value=customer.name, icon=':material/person:')
+        phone, phone_country, email, address, postal_code = \
+            _customer_contact_form_fields(
+                f'{prefix}_credit_confirm_{customer.id}', customer)
+        tax_id = st.text_input(
+            'RFC o identificación fiscal', value=customer.tax_id or '',
+            icon=':material/badge:')
+        notes = st.text_area(
+            'Notas de seguimiento', value=customer.notes or '', height=70)
+        actions = st.columns(2)
+        cancel = actions[0].form_submit_button(
+            'Cancelar', icon=':material/close:', width='stretch')
+        confirm = actions[1].form_submit_button(
+            'Confirmar y continuar', type='primary', icon=':material/check:',
+            width='stretch')
+    if cancel:
+        st.rerun()
+    if confirm:
+        try:
+            customer = operations.update_customer(
+                customer.id, name, phone, address, email, tax_id, notes,
+                actor=_actor_name(), phone_country=phone_country,
+                postal_code=postal_code)
+            st.session_state[f'{prefix}_credit_customer_confirmed_id'] = customer.id
+            st.toast('Datos del cliente confirmados.', icon=':material/person_check:')
+            st.rerun()
+        except Exception as error:
+            st.error(str(error), icon=':material/error:')
+
+
+@st.dialog('Registrar cliente para crédito', icon=':material/person_add:', width='large')
+def _credit_customer_create_dialog(prefix, proposed_name):
+    """Alta rápida en modal para mantener compacta la pantalla de venta."""
+    st.caption('El teléfono y el domicilio son obligatorios para vender a crédito.')
+    with st.form(f'{prefix}_credit_customer_create_form', enter_to_submit=False):
+        name = st.text_input(
+            'Nombre completo *', value=proposed_name, icon=':material/person:')
+        phone, phone_country, email, address, postal_code = \
+            _customer_contact_form_fields(f'{prefix}_credit_create')
+        tax_id = st.text_input('RFC o identificación fiscal', icon=':material/badge:')
+        notes = st.text_area('Notas de seguimiento', height=70)
+        actions = st.columns(2)
+        cancel = actions[0].form_submit_button(
+            'Cancelar', icon=':material/close:', width='stretch')
+        create = actions[1].form_submit_button(
+            'Registrar y continuar', type='primary', icon=':material/person_add:',
+            width='stretch')
+    if cancel:
+        st.rerun()
+    if create:
+        try:
+            operations = RepositoryFactory.get_operations_repository()
+            customer = operations.add_customer(
+                name, phone, email, tax_id,
+                f'Alta rápida desde venta a crédito. {notes}'.strip(), address=address,
+                phone_country=phone_country, postal_code=postal_code)
+            operations.audit(
+                'cliente_creado_credito', _actor_name(), 'customer',
+                customer.id, customer.name)
+            st.session_state[f'{prefix}_credit_customer_confirmed_id'] = customer.id
+            st.toast('Cliente registrado y confirmado.', icon=':material/person_check:')
+            st.rerun()
+        except Exception as error:
+            st.error(str(error), icon=':material/error:')
+
+
 def _credit_customer_controls(prefix):
     """Selecciona un cliente activo o permite darlo de alta antes del crédito."""
     operations = RepositoryFactory.get_operations_repository()
     customers = operations.get_customers()
     labels = {
-        f'{customer.name} · {customer.phone or "sin teléfono"}': customer
+        (f'{customer.name} · {customer.phone or "sin teléfono"} · '
+         f'{getattr(customer, "address", "") or "sin dirección"}'): customer
         for customer in customers
     }
     customers_by_name = {customer.name.casefold(): customer for customer in customers}
@@ -1385,7 +1872,7 @@ def _credit_customer_controls(prefix):
         options=list(labels),
         index=None,
         accept_new_options=True,
-        placeholder='Busca por nombre o escribe uno nuevo',
+        placeholder='Escribe nombre, teléfono o dirección para filtrar',
         help='El crédito sólo puede registrarse a un cliente del directorio.',
         key=f'{prefix}_credit_customer_select',
         width='stretch',
@@ -1396,63 +1883,50 @@ def _credit_customer_controls(prefix):
     selected_text = str(selected).strip()
     customer = labels.get(selected_text) or customers_by_name.get(selected_text.casefold())
     if customer is not None:
-        st.caption(
-            f'Cliente registrado · Tel: {customer.phone or "sin teléfono"} · '
-            f'Correo: {customer.email or "sin correo"}')
+        phone_digits = ''.join(
+            character for character in (customer.phone or '') if character.isdigit())
+        complete = (
+            len(phone_digits) >= 7
+            and len((getattr(customer, 'address', '') or '').strip()) >= 5
+        )
+        confirmed = (
+            st.session_state.get(f'{prefix}_credit_customer_confirmed_id') == customer.id)
+        with st.container(border=True):
+            status = ':green-badge[Datos confirmados]' if confirmed else ':orange-badge[Pendiente]'
+            st.markdown(f'**:material/person: {customer.name}**  {status}')
+            st.caption(
+                f'{customer.phone or "Sin teléfono"} · '
+                f'{getattr(customer, "address", "") or "Sin domicilio"}'
+                f'{f" · CP {customer.postal_code}" if getattr(customer, "postal_code", "") else ""}')
+            button_label = 'Editar datos' if confirmed else 'Revisar y confirmar datos'
+            if st.button(
+                    button_label, type='primary' if not confirmed else 'secondary',
+                    icon=':material/edit:', width='stretch',
+                    key=f'{prefix}_open_credit_customer_{customer.id}'):
+                _credit_customer_confirmation_dialog(prefix, customer.id)
+        if not complete or not confirmed:
+            return customer, 'Revisa y confirma la ficha del cliente para continuar.'
         return customer, ''
 
     if selected_text.casefold() in ('público general', 'publico general'):
         return None, 'Público general no puede usarse en ventas a crédito.'
 
     st.info(
-        'Ese cliente aún no está registrado. Captura sus datos para poder venderle a crédito.',
+        'Ese cliente aún no está registrado.',
         icon=':material/person_add:')
-    with st.container(border=True):
-        st.markdown('#### Alta rápida de cliente')
-        contact_columns = st.columns(2)
-        phone = contact_columns[0].text_input(
-            'Teléfono *', key=f'{prefix}_new_credit_customer_phone',
-            placeholder='Número de contacto')
-        email = contact_columns[1].text_input(
-            'Correo electrónico', key=f'{prefix}_new_credit_customer_email',
-            placeholder='Opcional')
-        tax_id = st.text_input(
-            'RFC o identificación fiscal', key=f'{prefix}_new_credit_customer_tax_id',
-            placeholder='Opcional')
-        notes = st.text_area(
-            'Notas del cliente', key=f'{prefix}_new_credit_customer_notes',
-            placeholder='Dirección, referencia, límite acordado u observación',
-            height=72)
-        if st.button(
-                'Registrar cliente y usarlo', type='primary',
-                icon=':material/person_add:', width='stretch',
-                key=f'{prefix}_create_credit_customer'):
-            if len(selected_text) < 2:
-                st.error('Escribe el nombre completo del cliente.', icon=':material/error:')
-            elif not phone.strip():
-                st.error('Captura al menos un teléfono para crédito.', icon=':material/error:')
-            else:
-                try:
-                    customer = operations.add_customer(
-                        selected_text, phone, email, tax_id,
-                        f'Alta rápida desde venta a crédito. {notes}'.strip())
-                    operations.audit(
-                        'cliente_creado_credito', _actor_name(), 'customer',
-                        customer.id, customer.name)
-                    _queue_activity_notice(
-                        'Cliente registrado',
-                        f'“{customer.name}” quedó listo para ventas a crédito.',
-                        icon=':material/person_add:')
-                    st.rerun()
-                except Exception as error:
-                    st.error(str(error), icon=':material/error:')
+    if st.button(
+            'Registrar cliente', type='primary', icon=':material/person_add:',
+            width='stretch', key=f'{prefix}_open_create_credit_customer'):
+        _credit_customer_create_dialog(prefix, selected_text)
     return None, 'Registra el cliente antes de confirmar la venta a crédito.'
 
 
+@st.fragment
 def _payment_controls(prefix, total):
     """Controles de cobro reutilizables y datos seguros para auditoría."""
+    available_methods = _enabled_payment_methods()
     method = st.segmented_control(
-        'Método de pago', PAYMENT_METHODS, default='Efectivo', selection_mode='single',
+        'Método de pago', available_methods, default=available_methods[0], selection_mode='single',
         width='stretch', key=f'{prefix}_payment_method',
     ) or 'Efectivo'
     details = []
@@ -1524,7 +1998,7 @@ def _payment_controls(prefix, total):
         st.caption('Divide el total entre dos o más métodos. La suma debe coincidir con el cobro.')
         mixed_columns = st.columns(3)
         cash_amount = mixed_columns[0].number_input(
-            'Efectivo (MXN)', min_value=0.0, max_value=float(total), step=10.0,
+            'Efectivo recibido (MXN)', min_value=0.0, step=10.0,
             value=float(total), format='%.2f', key=f'{prefix}_mixed_cash')
         card_amount = mixed_columns[1].number_input(
             'Tarjeta (MXN)', min_value=0.0, max_value=float(total), step=10.0,
@@ -1532,11 +2006,16 @@ def _payment_controls(prefix, total):
         transfer_amount = mixed_columns[2].number_input(
             'Transferencia (MXN)', min_value=0.0, max_value=float(total), step=10.0,
             value=0.0, format='%.2f', key=f'{prefix}_mixed_transfer')
-        mixed_total = float(cash_amount) + float(card_amount) + float(transfer_amount)
-        difference = float(total) - mixed_total
-        st.metric('Total distribuido', _mxn(mixed_total),
-                  delta=f'{_mxn(abs(difference))} {"faltante" if difference > 0 else "excedente"}'
-                  if abs(difference) >= .01 else 'Completo')
+        non_cash_total = float(card_amount) + float(transfer_amount)
+        pending_cash = max(0.0, float(total) - non_cash_total)
+        change = max(0.0, float(cash_amount) - pending_cash)
+        received_total = float(cash_amount) + non_cash_total
+        summary_columns = st.columns(3)
+        summary_columns[0].metric('Total recibido', _mxn(received_total))
+        summary_columns[1].metric('Aplicado al cobro', _mxn(min(float(total), received_total)))
+        summary_columns[2].metric('Cambio a entregar', _mxn(change))
+        difference = (max(0.0, pending_cash - float(cash_amount))
+                      if non_cash_total <= float(total) else float(total) - non_cash_total)
         active_methods = sum(value > 0 for value in (
             float(cash_amount), float(card_amount), float(transfer_amount)))
         if active_methods < 2:
@@ -1903,9 +2382,11 @@ def _render_sales():
             'Buscar productos', placeholder='Buscar por nombre o código de barras',
             icon=':material/search:', label_visibility='collapsed',
             key=f'pos_search_{checkout_version}',
-        ).strip().lower()
+        ).strip()
+        normalized_search = _search_text(search)
+        search_terms = tuple(normalized_search.split())
         exact_barcode = next((product for product in available
-                              if search and (product.barcode or '').lower() == search), None)
+                              if normalized_search and _search_text(product.barcode) == normalized_search), None)
         if exact_barcode is not None:
             current_scanned = st.session_state.pos_cart.get(exact_barcode.id, 0)
             st.success(
@@ -1919,7 +2400,6 @@ def _render_sales():
                         exact_barcode.id, current_scanned + 1,
                         st.session_state.pos_cart_prices.get(
                             exact_barcode.id, float(exact_barcode.price.amount)))
-                    st.rerun()
                 else:
                     st.error('Ya agregaste todas las existencias disponibles.')
         filter_columns = st.columns(2)
@@ -1931,9 +2411,10 @@ def _render_sales():
             key=f'pos_sort_order_{checkout_version}')
         filtered = [
             product for product in available
-            if not search or search in product.name.lower()
-            or search in (product.barcode or '').lower()
-            or search in (product.description or '').lower()
+            if not search_terms or all(
+                term in _search_text(
+                    f'{product.name} {product.barcode or ""} {product.description or ""}')
+                for term in search_terms)
         ]
         if stock_filter == 'Stock suficiente':
             filtered = [product for product in filtered if product.quantity > LOW_STOCK_THRESHOLD]
@@ -1943,14 +2424,20 @@ def _render_sales():
             filtered = [product for product in filtered
                         if st.session_state.pos_cart.get(product.id, 0) > 0]
         if sort_order == 'Nombre A–Z':
-            filtered.sort(key=lambda product: product.name.lower())
+            filtered.sort(key=lambda product: (
+                _catalog_search_rank(product, search_terms), _search_text(product.name)))
         elif sort_order == 'Menor precio':
             filtered.sort(key=lambda product: float(product.price.amount))
         elif sort_order == 'Mayor precio':
             filtered.sort(key=lambda product: float(product.price.amount), reverse=True)
         else:
             filtered.sort(key=lambda product: product.quantity)
-        st.caption(f'{len(filtered)} productos encontrados · desplázate dentro del mosaico')
+        if search_terms:
+            st.caption(
+                f'{len(filtered)} coincidencia(s) para “{search}” · '
+                'primero aparecen los nombres que comienzan igual.')
+        else:
+            st.caption(f'{len(filtered)} productos encontrados · desplázate dentro del mosaico')
 
         if not available:
             st.info('No hay productos con existencias. Agrega inventario para comenzar.', icon=':material/inventory_2:')
@@ -1971,7 +2458,7 @@ def _render_sales():
                                 '<div><div class="product-card-name">'
                                 f'{escape(product.name)}</div>'
                                 f'<span class="product-card-stock{stock_class}">'
-                                f'{product.quantity} disponibles</span></div>'
+                                f'{product.quantity} {escape(getattr(product, "unit_of_measure", "Unidad") or "Unidad")} disponibles</span></div>'
                                 '<div class="product-card-icon">▦</div></div>'
                                 f'<div class="product-card-price">{_mxn(product.price.amount)}</div>'
                                 f'<div class="product-card-meta">Código: {barcode}</div>',
@@ -1992,7 +2479,6 @@ def _render_sales():
                                         product.id, current + 1,
                                         st.session_state.pos_cart_prices.get(
                                             product.id, float(product.price.amount)))
-                                    st.rerun()
                                 else:
                                     st.toast('Ya agregaste todo el stock disponible.',
                                              icon=':material/warning:')
@@ -2050,7 +2536,7 @@ def _render_sales():
                                 f'<div class="cart-item-name">{escape(product.name)}</div>'
                                 f'<span class="cart-quantity-badge">× {current_quantity}</span></div>'
                                 f'<div class="cart-tile-price">{_mxn(line_total)}'
-                                f'<small>{_mxn(unit_price)} c/u</small></div>',
+                                f'<small>{_mxn(unit_price)} por {escape(getattr(product, "unit_of_measure", "Unidad") or "Unidad")}</small></div>',
                                 unsafe_allow_html=True)
                             quantity_column, remove_column = st.columns(
                                 (1, .38), gap='xsmall', vertical_alignment='center')
@@ -2058,17 +2544,15 @@ def _render_sales():
                             if quantity_key not in st.session_state:
                                 st.session_state[quantity_key] = current_quantity
                             new_quantity = quantity_column.number_input(
-                                f'Cantidad de {product.name}', min_value=1,
+                                f'Cantidad de {product.name} ({getattr(product, "unit_of_measure", "Unidad") or "Unidad"})', min_value=1,
                                 max_value=product.quantity, step=1, key=quantity_key,
                                 label_visibility='collapsed')
                             if int(new_quantity) != current_quantity:
                                 _set_cart_quantity(product_id, new_quantity)
-                                st.rerun()
                             if remove_column.button(
                                     '', key=f'remove_cart_{product_id}',
                                     icon=':material/delete:', help=f'Quitar {product.name}'):
                                 _remove_from_cart(product_id)
-                                st.rerun()
 
                 st.markdown(
                     f'<div class="pos-total"><small>TOTAL A COBRAR</small>'
@@ -2162,6 +2646,7 @@ def _render_sales():
                                 f'checkout_{checkout_version}_credit_data', {})
                             credit_payload = {
                                 'customer': credit_data.get('customer', ''),
+                                'customer_id': credit_data.get('customer_id'),
                                 'due_date': credit_data.get('due_date'),
                                 'down_payment': credit_data.get('down_payment', 0),
                                 'total': total,
@@ -2232,7 +2717,9 @@ def _render_sales():
                                         ' Cobro confirmado; no se envió ningún ticket.')
                         if charge_and_print:
                             thermal_items = tuple({
-                                'name': product_by_id[product_id].name,
+                                'name': (
+                                    f"{product_by_id[product_id].name} "
+                                    f"({getattr(product_by_id[product_id], 'unit_of_measure', 'Unidad') or 'Unidad'})"),
                                 'quantity': int(quantity),
                                 'unit_price': round(
                                     _cart_unit_price(product_by_id[product_id], quantity)
@@ -2263,6 +2750,7 @@ def _render_sales():
                     except Exception as error:
                         st.error(f'No se pudo completar la venta: {error}')
 
+        return
         history_opened_from_dashboard = st.session_state.pop('sales_history_open', False)
         with st.expander(
                 'Movimientos recientes', icon=':material/receipt_long:',
@@ -2398,6 +2886,58 @@ def _render_sales():
 # ---------------------------------------------------------------------------
 # Inventario
 # ---------------------------------------------------------------------------
+
+def _render_recent_sales():
+    _hero('Movimientos recientes', 'Consulta operaciones e imprime nuevamente sus tickets.',
+          'VENTAS · HISTORIAL')
+    limit = st.selectbox('Mostrar operaciones', (8, 20, 50), key='recent_sales_limit')
+    transactions = {}
+    for sale in sorted(RepositoryFactory.get_sale_repository().get_all_sales(),
+                       key=lambda item: item.id, reverse=True):
+        transactions.setdefault(sale.transaction_id or f'legacy-{sale.id}', []).append(sale)
+    if not transactions:
+        st.info('Todavía no hay ventas registradas.', icon=':material/receipt_long:')
+        return
+    business = _business_export_data()
+    st.caption('Desplázate dentro del mosaico para consultar más operaciones.')
+    grid = st.container(height=650, border=True, key='recent_sales_grid')
+    visible_transactions = list(transactions.values())[:limit]
+    for row_start in range(0, len(visible_transactions), 3):
+        cards = grid.columns(3, gap='small')
+        for column, lines in zip(cards, visible_transactions[row_start:row_start + 3]):
+            first, grouped = lines[0], {}
+            for sale in lines:
+                name = sale.product_name or (
+                    sale.product.name if sale.product else f'Producto #{sale.product_id}')
+                item = grouped.setdefault(name, {'quantity': 0, 'total': 0.0})
+                item['quantity'] += 1
+                item['total'] += float(sale.price.amount)
+            total = sum(item['total'] for item in grouped.values())
+            folio = _sale_folio(min(sale.id for sale in lines))
+            items = tuple(
+                {'name': name, 'quantity': item['quantity'],
+                 'unit_price': item['total'] / item['quantity']}
+                for name, item in grouped.items())
+            with column.container(border=True):
+                st.subheader(f'{folio} · {_mxn(total)}')
+                st.caption(
+                    f'{first.date} · {first.payment_method or "Sin método"} · '
+                    f'{first.customer or "Público general"}')
+                width = st.segmented_control(
+                    'Ancho de papel', (58, 80), default=58, required=True,
+                    key=f'recent_ticket_width_{first.id}',
+                    format_func=lambda value: f'{value} mm')
+                if st.button('Imprimir ticket', icon=':material/print:', type='primary',
+                             width='stretch', key=f'recent_ticket_print_{first.id}'):
+                    try:
+                        printer = _print_thermal_ticket(
+                            business, folio, first.created_at or first.date, items,
+                            first.payment_method or 'Sin método',
+                            first.payment_details or '', first.customer or 'Público general',
+                            width)
+                        st.success(f'Ticket enviado a {printer}.')
+                    except Exception as error:
+                        st.error(f'No se pudo imprimir: {error}')
 
 def _render_inventory_excel_import(products):
     import_version = st.session_state.setdefault('inventory_import_version', 0)
@@ -2543,6 +3083,194 @@ def _render_inventory_downloads(products, key_prefix, include_cost):
         width='stretch')
 
 
+@st.dialog('Editar producto', width='large')
+def _edit_product_dialog(product, category_options, supplier_options):
+    """Editor concentrado para evitar que el formulario opaque el catálogo."""
+    st.caption(f'Editando: {product.name} · Código: {product.barcode or "sin código"}')
+    with st.form(f'edit_product_dialog_{product.id}', enter_to_submit=False):
+        identity = st.columns(2)
+        name = identity[0].text_input('Nombre *', value=product.name)
+        barcode = identity[1].text_input('Código de barras', value=product.barcode or '')
+        description = st.text_area(DESCRIPTION_LABEL, value=product.description or '', height=90)
+        prices = st.columns(2)
+        price = prices[0].number_input('Precio de venta (MXN)', min_value=0.01,
+                                        value=float(product.price.amount), step=1.0, format='%.2f')
+        cost = prices[1].number_input('Precio de costo (MXN)', min_value=0.0,
+                                       value=float(product.cost.amount), step=1.0, format='%.2f')
+        current_category = canonical_inventory_value(product.category or 'General', category_options)
+        category_options = tuple(dict.fromkeys((*category_options, current_category)))
+        category = st.selectbox('Categoría *', category_options,
+                                index=category_options.index(current_category), accept_new_options=True)
+        unit_of_measure = st.selectbox(
+            'Unidad de medida', UNIT_OF_MEASURE_OPTIONS,
+            index=(UNIT_OF_MEASURE_OPTIONS.index(getattr(product, 'unit_of_measure', 'Unidad'))
+                   if getattr(product, 'unit_of_measure', 'Unidad') in UNIT_OF_MEASURE_OPTIONS else 0),
+            help='Ejemplos: pieza, kg, litro, metro o servicio.')
+        current_supplier = canonical_inventory_value(product.supplier, supplier_options)
+        supplier_options = tuple(dict.fromkeys(
+            (*supplier_options, *((current_supplier,) if current_supplier else ()))))
+        supplier = st.selectbox('Proveedor', supplier_options,
+                                index=(supplier_options.index(current_supplier)
+                                       if current_supplier else None), accept_new_options=True,
+                                placeholder='Selecciona o escribe un proveedor')
+        stocks = st.columns(2)
+        minimum_stock = stocks[0].number_input('Existencia mínima', min_value=0, step=1,
+                                                 value=product.minimum_stock or 0)
+        maximum_stock = stocks[1].number_input('Existencia máxima (0 = sin límite)', min_value=0,
+                                                 step=1, value=getattr(product, 'maximum_stock', 0) or 0)
+        wholesale = st.columns(2)
+        wholesale_min = wholesale[0].number_input('Mayoreo desde (unidades)', min_value=0, step=1,
+                                                   value=product.wholesale_min_quantity or 0)
+        wholesale_price = wholesale[1].number_input('Precio de mayoreo', min_value=0.0, step=1.0,
+                                                     format='%.2f', value=float(product.wholesale_price.amount))
+        save = st.form_submit_button('Guardar cambios', type='primary', icon=':material/save:', width='stretch')
+    if save:
+        clean_category = canonical_inventory_value(category, category_options)
+        clean_supplier = canonical_inventory_value(supplier, supplier_options)
+        if not name.strip() or not description.strip() or not clean_category:
+            st.error('Completa nombre, descripción y categoría.', icon=':material/error:')
+        elif int(maximum_stock) and int(maximum_stock) < int(minimum_stock):
+            st.error('La existencia máxima debe ser mayor o igual a la mínima.', icon=':material/error:')
+        elif int(wholesale_min) > 0 and not (0 < float(wholesale_price) < float(price)):
+            st.error('El precio de mayoreo debe ser mayor que cero y menor al precio normal.', icon=':material/error:')
+        else:
+            try:
+                updated = Product(id=product.id, name=name.strip(), description=description.strip(),
+                                  price=CUPMoney(f'{price:.2f}'), cost=CUPMoney(f'{cost:.2f}'),
+                                  quantity=product.quantity, barcode=barcode.strip(), category=clean_category,
+                                  supplier=clean_supplier, unit_of_measure=unit_of_measure,
+                                  minimum_stock=int(minimum_stock), is_active=True,
+                                  maximum_stock=int(maximum_stock), wholesale_min_quantity=int(wholesale_min),
+                                  wholesale_price=CUPMoney(f'{wholesale_price:.2f}'))
+                RepositoryFactory.get_product_repository().update_product(updated)
+                RepositoryFactory.get_operations_repository().audit(
+                    'producto_editado', _actor_name(), 'product', product.id, name.strip())
+                _queue_activity_notice('Cambios guardados', f'Se actualizó “{name.strip()}”.',
+                                       icon=':material/edit_square:')
+                st.rerun()
+            except (UniqueProductNameException, UniqueProductBarcodeException) as error:
+                st.warning(str(error), icon=':material/content_copy:')
+            except Exception as error:
+                st.error(str(error), icon=':material/error:')
+
+
+@st.dialog('Agregar producto', width='large')
+def _add_product_dialog(category_options, supplier_options):
+    st.caption('Completa la información. Los campos con * son obligatorios.')
+    with st.form('add_product_dialog', clear_on_submit=False, enter_to_submit=False):
+        identity = st.columns(2)
+        name = identity[0].text_input('Nombre *')
+        barcode = identity[1].text_input('Código de barras (opcional)')
+        description = st.text_area(f'{DESCRIPTION_LABEL} *', height=90)
+        prices = st.columns(3)
+        price = prices[0].number_input('Precio de venta (MXN) *', min_value=0.01,
+                                       value=None, step=1.0, format='%.2f')
+        cost = prices[1].number_input('Precio de costo (MXN) *', min_value=0.01,
+                                      value=None, step=1.0, format='%.2f')
+        quantity = prices[2].number_input('Cantidad disponible *', min_value=0,
+                                          value=None, step=1)
+        category = st.selectbox('Categoría *', category_options, index=None,
+                                accept_new_options=True, placeholder='Selecciona o escribe una categoría')
+        unit_of_measure = st.selectbox('Unidad de medida', UNIT_OF_MEASURE_OPTIONS,
+                                       help='Selecciona cómo se controla este producto.')
+        supplier = st.selectbox('Proveedor (opcional)', supplier_options, index=None,
+                                accept_new_options=True, placeholder='Selecciona o escribe un proveedor')
+        stocks = st.columns(2)
+        minimum_stock = stocks[0].number_input('Existencia mínima', min_value=0, value=5, step=1)
+        maximum_stock = stocks[1].number_input('Existencia máxima (0 = sin límite)', min_value=0, value=0, step=1)
+        save = st.form_submit_button('Guardar producto', type='primary', icon=':material/save:', width='stretch')
+    if save:
+        clean_name, clean_description = name.strip(), description.strip()
+        clean_category = canonical_inventory_value(category, category_options)
+        clean_supplier = canonical_inventory_value(supplier, supplier_options)
+        if not clean_name or not clean_description or not clean_category or price is None or cost is None or quantity is None:
+            st.error('Completa todos los campos obligatorios.', icon=':material/error:')
+        elif int(maximum_stock) and int(maximum_stock) < int(minimum_stock):
+            st.error('La existencia máxima debe ser mayor o igual a la mínima.', icon=':material/error:')
+        else:
+            try:
+                product = Product(name=clean_name, description=clean_description,
+                                  price=CUPMoney(f'{price:.2f}'), cost=CUPMoney(f'{cost:.2f}'),
+                                  quantity=int(quantity), barcode=barcode.strip(), category=clean_category,
+                                  supplier=clean_supplier, unit_of_measure=unit_of_measure,
+                                  minimum_stock=int(minimum_stock),
+                                  maximum_stock=int(maximum_stock), wholesale_min_quantity=0,
+                                  wholesale_price=CUPMoney('0.00'))
+                RepositoryFactory.get_product_repository().insert_product(product)
+                RepositoryFactory.get_operations_repository().audit(
+                    'producto_creado', _actor_name(), 'product', product.id,
+                    f'{clean_name} · existencia inicial {int(quantity)}')
+                _queue_activity_notice('Producto agregado correctamente',
+                                       f'“{clean_name}” ya está disponible en {clean_category}.',
+                                       icon=':material/add_box:')
+                st.rerun()
+            except (UniqueProductNameException, UniqueProductBarcodeException) as error:
+                st.warning(str(error), icon=':material/content_copy:')
+            except Exception as error:
+                st.error(str(error), icon=':material/error:')
+
+
+def _render_inventory_financial_summary(products):
+    """Muestra inversión, valor de venta y ganancia potencial del inventario."""
+    valued_products = [product for product in products if product.quantity > 0]
+    cost_value = sum(
+        product.quantity * float(product.cost.amount)
+        for product in valued_products)
+    public_value = sum(
+        product.quantity * float(product.price.amount)
+        for product in valued_products)
+    potential_profit = public_value - cost_value
+    potential_margin = (potential_profit / public_value * 100) if public_value else 0.0
+    total_units = sum(product.quantity for product in valued_products)
+    low_stock = sum(
+        1 for product in products
+        if 0 < product.quantity <= (product.minimum_stock or LOW_STOCK_THRESHOLD))
+    out_of_stock = sum(1 for product in products if product.quantity <= 0)
+
+    with st.container(border=True):
+        heading = st.container(horizontal=True, horizontal_alignment='distribute',
+                               vertical_alignment='center')
+        heading.subheader('Valor de tu inventario', anchor=False)
+        heading.badge(
+            f'{total_units:,} unidades disponibles', color='blue',
+            icon=':material/inventory_2:')
+        st.caption('Estimación basada en la existencia disponible y los precios actuales.')
+
+        with st.container(horizontal=True):
+            st.metric(
+                'Valor a precio cliente', _mxn(public_value), border=True,
+                help='Existencia × precio de venta al cliente.')
+            st.metric(
+                'Dinero invertido', _mxn(cost_value), border=True,
+                help='Existencia × costo real de compra.')
+            st.metric(
+                'Ganancia potencial', _mxn(potential_profit),
+                delta=f'{potential_margin:.1f} % de margen', border=True,
+                help='Valor a precio cliente menos dinero invertido.')
+
+        if valued_products:
+            chart_frame = pd.DataFrame({
+                'Monto (MXN)': [public_value, cost_value, potential_profit],
+            }, index=['Precio cliente', 'Costo real', 'Ganancia'])
+            st.bar_chart(chart_frame, horizontal=True, height=210)
+        else:
+            st.info('Agrega existencias para calcular el valor del inventario.',
+                    icon=':material/inventory_2:')
+
+        status = st.container(horizontal=True)
+        status.badge(
+            f'{low_stock} con existencia baja',
+            color='orange' if low_stock else 'green',
+            icon=':material/warning:' if low_stock else ':material/check_circle:')
+        status.badge(
+            f'{out_of_stock} agotados',
+            color='red' if out_of_stock else 'green',
+            icon=':material/error:' if out_of_stock else ':material/check_circle:')
+        st.caption(
+            'Ganancia potencial = valor a precio cliente − costo real. '
+            'No representa una venta ya realizada.')
+
+
 def _render_inventory():
     _hero('Inventario', 'Controla catálogo, precios y existencias con información lista para decidir.', 'GESTIÓN · CATÁLOGO')
     products = [product for product in RepositoryFactory.get_product_repository().get_all_products()
@@ -2550,10 +3278,16 @@ def _render_inventory():
     category_options = inventory_field_options(products, 'category')
     supplier_options = inventory_field_options(products, 'supplier')
 
+    _render_inventory_financial_summary(products)
+
     _render_inventory_excel_import(products)
 
+    if st.button('Nuevo producto', type='primary', icon=':material/add_box:',
+                 width='stretch', key='open_add_product_dialog'):
+        _add_product_dialog(category_options, supplier_options)
+
     inventory_form_version = st.session_state.setdefault('inventory_form_version', 0)
-    with st.expander('Agregar producto'):
+    if False:
         with st.form(f'add_product_form_{inventory_form_version}', enter_to_submit=False):
             name = st.text_input('Nombre *')
             description = st.text_area(f'{DESCRIPTION_LABEL} *', height=68)
@@ -2580,6 +3314,8 @@ def _render_inventory():
                 help='Reutiliza un proveedor registrado o escribe uno nuevo.',
                 key=f'add_product_supplier_{inventory_form_version}')
             minimum_stock = st.number_input('Existencia mínima', min_value=0, value=5, step=1)
+            maximum_stock = st.number_input(
+                'Existencia máxima (0 = sin límite)', min_value=0, value=0, step=1)
             wholesale_columns = st.columns(2)
             wholesale_min = wholesale_columns[0].number_input(
                 'Mayoreo desde (unidades)', min_value=0, value=0, step=1)
@@ -2612,12 +3348,16 @@ def _render_inventory():
             if int(wholesale_min) > 0 and not (0 < float(wholesale_price) < float(price)):
                 st.error('El precio de mayoreo debe ser mayor que cero y menor al precio normal.')
                 return
+            if int(maximum_stock) and int(maximum_stock) < int(minimum_stock):
+                st.error('La existencia máxima debe ser mayor o igual a la mínima.')
+                return
             try:
                 product = Product(name=clean_name, description=clean_description,
                                   price=CUPMoney(f'{price:.2f}'), cost=CUPMoney(f'{cost:.2f}'),
                                   quantity=int(quantity), barcode=barcode.strip(),
                                   category=clean_category, supplier=clean_supplier,
                                   minimum_stock=int(minimum_stock),
+                                  maximum_stock=int(maximum_stock),
                                   wholesale_min_quantity=int(wholesale_min),
                                   wholesale_price=CUPMoney(f'{wholesale_price:.2f}'))
                 RepositoryFactory.get_product_repository().insert_product(product)
@@ -2640,12 +3380,34 @@ def _render_inventory():
     if not products:
         st.info('No hay productos registrados.')
         return
-    st.dataframe(pd.DataFrame([{
-        'ID': p.id, 'Nombre': p.name, 'Precio': str(p.price), 'Costo': str(p.cost),
-        'Cantidad': p.quantity, 'Mínimo': p.minimum_stock, 'Categoría': p.category,
-        'Proveedor': p.supplier or '', 'Código de barras': p.barcode or '',
-    } for p in products]), width='stretch', hide_index=True)
-    _render_inventory_downloads(products, 'admin', include_cost=True)
+    inventory_search = st.text_input(
+        'Buscar en inventario', placeholder='Nombre, descripción o código de barras',
+        icon=':material/search:', label_visibility='collapsed',
+        key='inventory_catalog_search').strip()
+    inventory_search_terms = tuple(_search_text(inventory_search).split())
+    visible_products = [
+        product for product in products
+        if not inventory_search_terms or all(
+            term in _search_text(
+                f'{product.name} {product.barcode or ""} {product.description or ""}')
+            for term in inventory_search_terms)
+    ]
+    visible_products.sort(key=lambda product: (
+        _catalog_search_rank(product, inventory_search_terms), _search_text(product.name)))
+    if inventory_search_terms:
+        st.caption(
+            f'{len(visible_products)} coincidencia(s) para “{inventory_search}” · '
+            'se priorizan los nombres que comienzan igual.')
+    if not visible_products:
+        st.warning('No encontramos productos con esa búsqueda.', icon=':material/search_off:')
+    else:
+        st.dataframe(pd.DataFrame([{
+            'ID': p.id, 'Nombre': p.name, 'Precio': str(p.price), 'Costo': str(p.cost),
+        'Cantidad': p.quantity, 'Unidad': getattr(p, 'unit_of_measure', 'Unidad') or 'Unidad', 'Mínimo': p.minimum_stock,
+            'Máximo': getattr(p, 'maximum_stock', 0) or '', 'Categoría': p.category,
+            'Proveedor': p.supplier or '', 'Código de barras': p.barcode or '',
+        } for p in visible_products]), width='stretch', hide_index=True)
+        _render_inventory_downloads(visible_products, 'admin', include_cost=True)
 
     with st.expander('Inteligencia de producto y venta directa', expanded=False,
                      icon=':material/query_stats:'):
@@ -2722,7 +3484,25 @@ def _render_inventory():
             else:
                 st.info('Este producto todavía no tiene ventas completadas.')
 
-    with st.expander('Editar o dar de baja un producto'):
+    st.subheader('Editar producto')
+    st.caption('Selecciona un producto y abre una ventana enfocada para editarlo con mayor claridad.')
+    editor_names = [product.name for product in products]
+    editor_name = st.selectbox(
+        'Producto a editar', editor_names, index=None,
+        placeholder='Busca y selecciona un producto', key='inventory_dialog_product')
+    if editor_name is not None:
+        editor_product = next(product for product in products if product.name == editor_name)
+        editor_columns = st.columns((2, 1), vertical_alignment='center')
+        editor_columns[0].caption(
+            f'{editor_product.quantity} disponibles · Código: '
+            f'{editor_product.barcode or "sin código"}')
+        if editor_columns[1].button('Abrir editor', type='primary',
+                                    icon=':material/edit_square:', width='stretch'):
+            _edit_product_dialog(editor_product, category_options, supplier_options)
+
+    # Reemplazado por la ventana flotante anterior. Se conserva temporalmente el
+    # flujo histórico debajo para no romper sesiones activas durante la actualización.
+    if False:
         inventory_admin_version = _form_version('inventory_admin')
         names = [p.name for p in products]
         selected_name = st.selectbox(
@@ -2764,6 +3544,8 @@ def _render_inventory():
                 key=f'edit_product_supplier_{product.id}')
             minimum_stock = st.number_input('Existencia mínima', min_value=0, step=1,
                                             value=product.minimum_stock or 0)
+            maximum_stock = st.number_input('Existencia máxima (0 = sin límite)', min_value=0,
+                                            step=1, value=getattr(product, 'maximum_stock', 0) or 0)
             wholesale_columns = st.columns(2)
             wholesale_min = wholesale_columns[0].number_input(
                 'Mayoreo desde (unidades)', min_value=0, step=1,
@@ -2782,12 +3564,16 @@ def _render_inventory():
             if int(wholesale_min) > 0 and not (0 < float(wholesale_price) < float(price)):
                 st.error('El precio de mayoreo debe ser mayor que cero y menor al precio normal.')
                 return
+            if int(maximum_stock) and int(maximum_stock) < int(minimum_stock):
+                st.error('La existencia máxima debe ser mayor o igual a la mínima.')
+                return
             try:
                 updated = Product(id=product.id, name=name.strip(), description=description.strip(),
                                   price=CUPMoney(f'{price:.2f}'), cost=CUPMoney(f'{cost:.2f}'),
                                   quantity=product.quantity, barcode=barcode.strip(),
                                   category=clean_category, supplier=clean_supplier,
                                   minimum_stock=int(minimum_stock), is_active=True,
+                                  maximum_stock=int(maximum_stock),
                                   wholesale_min_quantity=int(wholesale_min),
                                   wholesale_price=CUPMoney(f'{wholesale_price:.2f}'))
                 RepositoryFactory.get_product_repository().update_product(updated)
@@ -3195,9 +3981,16 @@ def _render_inventory_readonly():
     products = [product for product in RepositoryFactory.get_product_repository().get_all_products()
                 if not product.is_temporary]
     search = st.text_input('Buscar inventario', placeholder='Nombre o código de barras',
-                           icon=':material/search:', label_visibility='collapsed').strip().lower()
-    visible = [p for p in products if not search or search in p.name.lower()
-               or search in (p.barcode or '').lower()]
+                           icon=':material/search:', label_visibility='collapsed').strip()
+    search_terms = tuple(_search_text(search).split())
+    visible = [
+        product for product in products
+        if not search_terms or all(
+            term in _search_text(f'{product.name} {product.barcode or ""} {product.description or ""}')
+            for term in search_terms)
+    ]
+    visible.sort(key=lambda product: (
+        _catalog_search_rank(product, search_terms), _search_text(product.name)))
     metrics = st.columns(3)
     metrics[0].metric('Productos', len(visible))
     metrics[1].metric('Unidades disponibles', sum(p.quantity for p in visible))
@@ -3208,7 +4001,8 @@ def _render_inventory_readonly():
         return
     st.dataframe(pd.DataFrame([{
         'Producto': p.name, 'Precio de venta': float(p.price.amount),
-        'Disponibles': p.quantity, 'Código': p.barcode or '—',
+        'Disponibles': p.quantity, 'Unidad': getattr(p, 'unit_of_measure', 'Unidad') or 'Unidad',
+        'Código': p.barcode or '—',
     } for p in visible]), column_config={
         'Precio de venta': st.column_config.NumberColumn(format='$ %.2f MXN'),
         'Disponibles': st.column_config.NumberColumn(format='%d'),
@@ -3387,6 +4181,7 @@ def _render_express_sale():
                     f'express_{express_version}_credit_data', {})
                 credit_payload = {
                     'customer': credit_data.get('customer', ''),
+                    'customer_id': credit_data.get('customer_id'),
                     'due_date': credit_data.get('due_date'),
                     'down_payment': credit_data.get('down_payment', 0),
                     'total': total,
@@ -3645,10 +4440,28 @@ def _render_quotes():
         business = _business_export_data()
         if not quotes:
             st.info('Todavía no hay cotizaciones guardadas.', icon=':material/request_quote:')
-        for quote in quotes:
+        st.caption('Selecciona una tarjeta para abrir el detalle. Desplázate para ver más cotizaciones.')
+        quote_grid = st.container(height=610, border=True, key='quote_history_grid')
+        for row_start in range(0, len(quotes), 3):
+            cards = quote_grid.columns(3, gap='small')
+            for card, quote in zip(cards, quotes[row_start:row_start + 3]):
+                total = sum(float(item.unit_price.amount) * item.quantity for item in quote.items)
+                with card.container(border=True):
+                    st.subheader(f'Cotización #{quote.id}')
+                    st.caption(f'{quote.customer} · {quote.date}')
+                    st.metric('Total', _mxn(total))
+                    st.caption(f'Estado: {quote.status} · {len(quote.items)} artículo(s)')
+                    if st.button('Ver detalle', icon=':material/visibility:', width='stretch',
+                                 key=f'view_quote_{quote.id}'):
+                        st.session_state['quote_history_selected'] = quote.id
+        selected_quote_id = st.session_state.get('quote_history_selected')
+        selected_quote = next(
+            (quote for quote in quotes if quote.id == selected_quote_id), None)
+        if selected_quote is not None:
+            quote = selected_quote
             total = sum(float(item.unit_price.amount) * item.quantity for item in quote.items)
-            with st.expander(f'#{quote.id} · {quote.customer} · {_mxn(total)} · {quote.status}',
-                             icon=':material/request_quote:'):
+            with st.expander(f'Detalle #{quote.id} · {quote.customer} · {_mxn(total)}',
+                             expanded=True, icon=':material/request_quote:'):
                 st.caption(f'{quote.date} · {quote.notes or "Sin notas"}')
                 st.dataframe(pd.DataFrame([{
                     'Artículo': item.description, 'Cantidad': item.quantity,
@@ -4205,10 +5018,6 @@ def _render_cash_opening():
             st.info('No existe una apertura registrada para esta fecha.',
                     icon=':material/history:')
             return
-        if not is_admin:
-            st.warning('La caja está cerrada. Solicita al administrador que confirme la apertura.',
-                       icon=':material/admin_panel_settings:')
-            return
         suggested_amount = 0.0
         suggested_details = {}
         source_close_id = None
@@ -4248,7 +5057,10 @@ def _render_cash_opening():
                 _mxn(carry_difference)),))
         opening_columns = st.columns(2)
         shift_responsible = opening_columns[0].text_input(
-            'Responsable del turno *', placeholder='Nombre de quien operará la caja',
+            'Responsable del turno *',
+            value=(_actor_name() if not is_admin else ''),
+            placeholder='Nombre de quien operará la caja',
+            disabled=not is_admin,
             key=f'cash_shift_responsible_{form_key}')
         cash_limit = opening_columns[1].number_input(
             'Límite máximo recomendado en caja (MXN)', min_value=100.0, value=3000.0,
@@ -4682,38 +5494,46 @@ def _render_cash_close():
         st.caption('Todavía no hay cortes de caja guardados.')
         return
     business = _business_export_data()
-    for cash_close in cash_closes[:30]:
-        difference = float(cash_close.difference.amount)
-        status = 'Cuadrado' if abs(difference) < .005 else ('Sobrante' if difference > 0 else 'Faltante')
-        with st.expander(
-                f'#{cash_close.id} · {cash_close.date} · {cash_close.cashier} · {status}',
-                icon=':material/receipt_long:'):
-            _render_cash_summary_cards((
-                ('Ventas', _mxn(cash_close.total_sales.amount)),
-                ('Esperado', _mxn(cash_close.expected_cash.amount)),
-                ('Contado', _mxn(cash_close.counted_cash.amount)),
-                ('Diferencia', _mxn(difference)),
-            ))
-            st.caption(cash_close.notes or 'Sin observaciones')
-            rows = _cash_close_rows(cash_close)
-            export_columns = st.columns(2)
-            export_columns[0].download_button(
-                'Descargar PDF',
-                generate_pdf_bytes(business, f'Corte de caja #{cash_close.id}',
-                                   f'Fecha: {cash_close.date} · Responsable: {cash_close.cashier}',
-                                   [('Conciliación', rows)]),
-                f'corte-caja-{cash_close.date}.pdf', 'application/pdf',
-                key=f'cash_close_pdf_{cash_close.id}', icon=':material/picture_as_pdf:',
-                width='stretch')
-            export_columns[1].download_button(
-                'Descargar Excel',
-                generate_excel_bytes(business, f'Corte de caja #{cash_close.id}',
-                                     f'Fecha: {cash_close.date} · Responsable: {cash_close.cashier}',
-                                     [('Conciliación', rows)]),
-                f'corte-caja-{cash_close.date}.xlsx',
-                'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
-                key=f'cash_close_excel_{cash_close.id}', icon=':material/table_view:',
-                width='stretch')
+    st.caption('Desplázate dentro del mosaico para revisar los cortes anteriores.')
+    close_grid = st.container(height=620, border=True, key='cash_close_history_grid')
+    for row_start in range(0, min(30, len(cash_closes)), 2):
+        cards = close_grid.columns(2, gap='small')
+        for card, cash_close in zip(cards, cash_closes[row_start:row_start + 2]):
+            difference = float(cash_close.difference.amount)
+            status = ('Cuadrado' if abs(difference) < .005
+                      else ('Sobrante' if difference > 0 else 'Faltante'))
+            with card.container(border=True):
+                st.subheader(f'Corte #{cash_close.id} · {status}')
+                st.caption(f'{cash_close.date} · {cash_close.cashier}')
+                _render_cash_summary_cards((
+                    ('Ventas', _mxn(cash_close.total_sales.amount)),
+                    ('Diferencia', _mxn(difference)),
+                ))
+                with st.expander('Ver conciliación y archivos', icon=':material/receipt_long:'):
+                    _render_cash_summary_cards((
+                        ('Esperado', _mxn(cash_close.expected_cash.amount)),
+                        ('Contado', _mxn(cash_close.counted_cash.amount)),
+                    ))
+                    st.caption(cash_close.notes or 'Sin observaciones')
+                    rows = _cash_close_rows(cash_close)
+                    export_columns = st.columns(2)
+                    export_columns[0].download_button(
+                        'Descargar PDF',
+                        generate_pdf_bytes(business, f'Corte de caja #{cash_close.id}',
+                                           f'Fecha: {cash_close.date} · Responsable: {cash_close.cashier}',
+                                           [('Conciliación', rows)]),
+                        f'corte-caja-{cash_close.date}.pdf', 'application/pdf',
+                        key=f'cash_close_pdf_{cash_close.id}', icon=':material/picture_as_pdf:',
+                        width='stretch')
+                    export_columns[1].download_button(
+                        'Descargar Excel',
+                        generate_excel_bytes(business, f'Corte de caja #{cash_close.id}',
+                                             f'Fecha: {cash_close.date} · Responsable: {cash_close.cashier}',
+                                             [('Conciliación', rows)]),
+                        f'corte-caja-{cash_close.date}.xlsx',
+                        'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+                        key=f'cash_close_excel_{cash_close.id}', icon=':material/table_view:',
+                        width='stretch')
 
 
 def _render_cash_history():
@@ -4932,28 +5752,32 @@ def _render_multicash_dashboard():
         })
 
     st.markdown('#### Acciones por caja')
-    for row in rows:
-        with st.container(border=True):
-            columns = st.columns((2, 1, 1, 1), vertical_alignment='center')
-            columns[0].markdown(
-                f"**{row['Caja']}** · {row['Codigo']}  \n"
-                f"{row['Estado']} · {row['Responsable']} · "
-                f"Efectivo {_mxn(row['Efectivo estimado'])}")
-            columns[1].button(
-                'Usar caja', key=f"multicash_use_{row['ID']}",
-                icon=':material/point_of_sale:', width='stretch',
-                on_click=_navigate_register_to_page,
-                args=(row['ID'], 'Ventas'))
-            columns[2].button(
-                'Apertura', key=f"multicash_open_{row['ID']}",
-                icon=':material/lock_open:', width='stretch',
-                on_click=_navigate_register_to_page,
-                args=(row['ID'], 'Apertura de caja'))
-            columns[3].button(
-                'Corte', key=f"multicash_close_{row['ID']}",
-                icon=':material/lock:', width='stretch',
-                on_click=_navigate_register_to_page,
-                args=(row['ID'], 'Corte de caja'))
+    st.caption('Cada tarjeta corresponde a una caja. Desplázate para ver todas.')
+    register_grid = st.container(height=610, border=True, key='multicash_action_grid')
+    for row_start in range(0, len(rows), 3):
+        cards = register_grid.columns(3, gap='small')
+        for card, row in zip(cards, rows[row_start:row_start + 3]):
+            with card.container(border=True):
+                st.subheader(row['Caja'])
+                st.caption(
+                    f"{row['Codigo']} · {row['Estado']} · {row['Responsable']}")
+                st.metric('Efectivo estimado', _mxn(row['Efectivo estimado']))
+                st.button(
+                    'Usar caja', key=f"multicash_use_{row['ID']}",
+                    icon=':material/point_of_sale:', width='stretch',
+                    on_click=_navigate_register_to_page,
+                    args=(row['ID'], 'Ventas'))
+                actions = st.columns(2)
+                actions[0].button(
+                    'Apertura', key=f"multicash_open_{row['ID']}",
+                    icon=':material/lock_open:', width='stretch',
+                    on_click=_navigate_register_to_page,
+                    args=(row['ID'], 'Apertura de caja'))
+                actions[1].button(
+                    'Corte', key=f"multicash_close_{row['ID']}",
+                    icon=':material/lock:', width='stretch',
+                    on_click=_navigate_register_to_page,
+                    args=(row['ID'], 'Corte de caja'))
 
 
 def _whatsapp_message_url(number, message):
@@ -5407,6 +6231,7 @@ def _render_statistics():
     _hero('Estadísticas', 'Analiza ventas, utilidad y resultado real por día, mes o año.',
           'ANÁLISIS · RENTABILIDAD')
     today = mexico_today()
+    _render_statistics_weekly_pulse(today)
     period = st.segmented_control(
         'Periodo de análisis', ('Día', 'Mes', 'Año'), default='Mes',
         selection_mode='single', width='stretch', key='statistics_period') or 'Mes'
@@ -5535,47 +6360,130 @@ def _render_statistics():
 # Estructura principal
 # ---------------------------------------------------------------------------
 
+@st.dialog('Registrar cliente', icon=':material/person_add:', width='large')
+def _customer_create_dialog():
+    """Alta enfocada de clientes sin abandonar el directorio."""
+    st.caption('Completa los datos de contacto para ventas, crédito y seguimiento.')
+    with st.form('customer_create_dialog_form', enter_to_submit=False):
+        name = st.text_input(
+            'Nombre completo *', placeholder='Ej. María López Hernández',
+            icon=':material/person:')
+        phone, phone_country, email, address, postal_code = \
+            _customer_contact_form_fields('customer_create')
+        details = st.columns(2)
+        tax_id = details[0].text_input(
+            'RFC o identificación fiscal', icon=':material/badge:')
+        notes = details[1].text_area(
+            'Notas de seguimiento', placeholder='Preferencias, horarios o referencias',
+            height=90)
+        submitted = st.form_submit_button(
+            'Guardar cliente', type='primary', icon=':material/save:',
+            width='stretch')
+    if submitted:
+        try:
+            operations = RepositoryFactory.get_operations_repository()
+            customer = operations.add_customer(
+                name, phone, email, tax_id, notes, address=address,
+                phone_country=phone_country, postal_code=postal_code)
+            operations.audit(
+                'cliente_creado', _actor_name(), 'customer', customer.id, customer.name)
+            _queue_activity_notice(
+                'Cliente registrado',
+                f'“{customer.name}” quedó disponible para futuras ventas y cotizaciones.',
+                icon=':material/person_add:')
+            st.rerun()
+        except Exception as error:
+            st.error(str(error), icon=':material/error:')
+
+
+@st.dialog('Editar cliente', icon=':material/edit:', width='large')
+def _customer_edit_dialog(customer_id):
+    """Edición enfocada de los datos comerciales de un cliente."""
+    operations = RepositoryFactory.get_operations_repository()
+    customer = next(
+        (item for item in operations.get_customers() if item.id == customer_id), None)
+    if customer is None:
+        st.error('El cliente ya no está disponible.', icon=':material/error:')
+        return
+    st.caption('Confirma que los datos estén vigentes antes de guardar los cambios.')
+    with st.form(f'customer_edit_dialog_form_{customer.id}', enter_to_submit=False):
+        edit_name = st.text_input(
+            'Nombre completo *', value=customer.name, icon=':material/person:')
+        edit_phone, phone_country, edit_email, edit_address, postal_code = \
+            _customer_contact_form_fields(f'customer_edit_{customer.id}', customer)
+        details = st.columns(2)
+        edit_tax_id = details[0].text_input(
+            'RFC o identificación fiscal', value=customer.tax_id or '',
+            icon=':material/badge:')
+        edit_notes = details[1].text_area(
+            'Notas de seguimiento', value=customer.notes or '', height=90)
+        save_customer = st.form_submit_button(
+            'Guardar cambios', type='primary', icon=':material/save:',
+            width='stretch')
+    if save_customer:
+        try:
+            operations.update_customer(
+                customer.id, edit_name, edit_phone, edit_address,
+                edit_email, edit_tax_id, edit_notes, actor=_actor_name(),
+                phone_country=phone_country, postal_code=postal_code)
+            _queue_activity_notice(
+                'Cliente actualizado',
+                f'Los datos de “{edit_name.strip()}” quedaron actualizados.',
+                icon=':material/person_check:')
+            st.rerun()
+        except Exception as error:
+            st.error(str(error), icon=':material/error:')
+
+
 def _render_customers():
     _hero('Clientes', 'Conserva datos básicos para atención, cotizaciones y seguimiento comercial.',
           'RELACIÓN · SERVICIO')
     operations = RepositoryFactory.get_operations_repository()
-    customer_version = _form_version('customer_new')
-    with st.expander('Registrar cliente', icon=':material/person_add:'):
-        with st.form(f'customer_form_{customer_version}', enter_to_submit=False):
-            name = st.text_input('Nombre *')
-            columns = st.columns(2)
-            phone = columns[0].text_input('Teléfono')
-            email = columns[1].text_input('Correo electrónico')
-            tax_id = st.text_input('RFC o identificación fiscal')
-            notes = st.text_area('Notas')
-            submitted = st.form_submit_button('Guardar cliente', type='primary')
-        if submitted:
-            try:
-                customer = operations.add_customer(name, phone, email, tax_id, notes)
-                operations.audit('cliente_creado', _actor_name(), 'customer', customer.id, customer.name)
-                _queue_activity_notice(
-                    'Cliente registrado',
-                    f'“{customer.name}” quedó disponible para futuras ventas y '
-                    'cotizaciones.', icon=':material/person_add:')
-                _reset_form('customer_new')
-                st.rerun()
-            except Exception as error:
-                st.error(str(error))
     customers = operations.get_customers()
     if not customers:
         st.info('No hay clientes registrados. Las ventas pueden continuar como Público general.')
+        if st.button(
+                'Agregar primer cliente', type='primary', icon=':material/person_add:',
+                key='open_first_customer_create_dialog'):
+            _customer_create_dialog()
         return
-    search = st.text_input('Buscar cliente', placeholder='Nombre, teléfono, correo o RFC',
-                           icon=':material/search:').strip().lower()
-    visible = [customer for customer in customers if not search or search in ' '.join((
-        customer.name, customer.phone or '', customer.email or '', customer.tax_id or '')).lower()]
-    st.dataframe(pd.DataFrame([{
+    search = st.text_input(
+        'Buscar cliente', placeholder='Nombre, teléfono, correo, domicilio, CP o RFC',
+        icon=':material/search:').strip()
+    visible = operations.search_customers(search, limit=50)
+    directory_event = st.dataframe(pd.DataFrame([{
         'Nombre': customer.name, 'Teléfono': customer.phone, 'Correo': customer.email,
-        'RFC': customer.tax_id, 'Puntos': customer.loyalty_points or 0,
+        'Dirección': (
+            f'{getattr(customer, "address", "") or ""}'
+            f'{f" · CP {customer.postal_code}" if getattr(customer, "postal_code", "") else ""}'
+        ), 'RFC': customer.tax_id,
+        'Puntos': customer.loyalty_points or 0,
         'Compras acumuladas': (float(customer.lifetime_spend.amount)
                                if customer.lifetime_spend else 0.0),
         'Notas': customer.notes,
-    } for customer in visible]), hide_index=True, width='stretch')
+    } for customer in visible]), hide_index=True, width='stretch',
+        on_select='rerun', selection_mode='single-row', key='customer_directory_table',
+        column_config={
+            'Compras acumuladas': st.column_config.NumberColumn(format='$ %.2f MXN'),
+        })
+    selected_rows = directory_event.selection.rows
+    selected_customer = (
+        visible[selected_rows[0]]
+        if selected_rows and selected_rows[0] < len(visible) else None)
+    with st.container(horizontal=True, horizontal_alignment='right'):
+        if st.button(
+                'Nuevo cliente', type='primary', icon=':material/person_add:',
+                key='open_customer_create_dialog'):
+            _customer_create_dialog()
+        if st.button(
+                'Editar seleccionado', icon=':material/edit:',
+                key='open_customer_edit_dialog', disabled=selected_customer is None):
+            _customer_edit_dialog(selected_customer.id)
+    st.caption('Selecciona una fila para editar su ficha.')
+
+    if not _is_administrator():
+        return
+
     with st.expander('Ajustar puntos de lealtad', icon=':material/loyalty:'):
         labels = {customer.name: customer for customer in customers}
         selected_loyalty = st.selectbox('Cliente', list(labels), index=None,
@@ -5709,57 +6617,265 @@ def _render_change_password():
         except Exception as error: st.error(str(error))
 
 
+def _credit_account_state(account, today=None):
+    """Estado operativo calculado sin alterar el registro histórico."""
+    today = today or mexico_today()
+    if account.due_date < today:
+        return 'Vencida'
+    if account.due_date == today:
+        return 'Vence hoy'
+    if (account.due_date - today).days <= 3:
+        return 'Próxima'
+    return account.status
+
+
+@st.dialog('Nueva cuenta', icon=':material/add_card:', width='large')
+def _credit_account_create_dialog():
+    """Registra cuentas manuales; las ventas a crédito siguen naciendo desde el POS."""
+    repository = RepositoryFactory.get_credit_account_repository()
+    customers = RepositoryFactory.get_operations_repository().get_customers()
+    st.caption('Registra una cuenta independiente o un saldo inicial pendiente.')
+    kind = st.segmented_control(
+        'Tipo de cuenta', ('Cobrar', 'Pagar'), default='Cobrar',
+        selection_mode='single', width='stretch', key='credit_create_kind') or 'Cobrar'
+    with st.form('credit_account_create_dialog_form', enter_to_submit=False):
+        if kind == 'Cobrar':
+            customer_names = [customer.name for customer in customers]
+            party = st.selectbox(
+                'Cliente *', customer_names, index=None,
+                placeholder='Selecciona un cliente registrado')
+            if not customer_names:
+                st.warning('Primero registra un cliente desde el módulo Clientes.',
+                           icon=':material/person_add:')
+        else:
+            party = st.text_input(
+                'Proveedor o responsable *', icon=':material/local_shipping:')
+        concept = st.text_input(
+            'Concepto *', placeholder='Describe el motivo de la cuenta',
+            icon=':material/description:')
+        amounts = st.columns(2)
+        amount = amounts[0].number_input(
+            'Importe total (MXN) *', min_value=.01, step=10.0, format='%.2f')
+        due = amounts[1].date_input(
+            'Fecha de vencimiento *', min_value=mexico_today())
+        reference = st.text_input(
+            'Referencia', placeholder='Folio, pedido o documento relacionado')
+        down = st.number_input(
+            'Enganche recibido en efectivo (MXN)', min_value=0.0, step=10.0,
+            format='%.2f', disabled=kind != 'Cobrar',
+            help='El enganche requiere una caja abierta y debe ser menor al total.')
+        actions = st.columns(2)
+        cancel = actions[0].form_submit_button(
+            'Cancelar', icon=':material/close:', width='stretch')
+        create = actions[1].form_submit_button(
+            'Guardar cuenta', type='primary', icon=':material/save:', width='stretch',
+            disabled=kind == 'Cobrar' and not customers)
+    if cancel:
+        st.rerun()
+    if create:
+        try:
+            account = repository.create(
+                kind, party or '', concept, amount, due, _actor_name(), reference, down,
+                register_id=_active_cash_register().id)
+            _queue_activity_notice(
+                'Cuenta registrada',
+                f'La cuenta #{account.id} de {account.party_name} quedó lista para seguimiento.',
+                icon=':material/add_card:')
+            st.rerun()
+        except Exception as error:
+            st.error(str(error), icon=':material/error:')
+
+
+@st.dialog('Registrar abono', icon=':material/payments:', width='large')
+def _credit_payment_dialog(account_id):
+    repository = RepositoryFactory.get_credit_account_repository()
+    account = next(
+        (item for item in repository.active_accounts() if item.id == account_id), None)
+    if account is None:
+        st.error('La cuenta ya no tiene saldo pendiente.', icon=':material/task_alt:')
+        return
+    balance = float(account.balance.amount)
+    st.markdown(f'### {account.party_name}')
+    st.caption(f'Cuenta #{account.id} · {account.concept}')
+    summary = st.columns(2)
+    summary[0].metric('Saldo actual', _mxn(balance), border=True)
+    summary[1].metric('Vencimiento', account.due_date.strftime('%d/%m/%Y'), border=True)
+    with st.form(f'credit_payment_dialog_form_{account.id}', enter_to_submit=False):
+        amount = st.number_input(
+            'Abono (MXN) *', min_value=.01, max_value=balance,
+            value=balance, step=10.0, format='%.2f')
+        method = st.segmented_control(
+            'Método de pago', repository.METHODS, default='Efectivo',
+            selection_mode='single', width='stretch') or 'Efectivo'
+        received = st.number_input(
+            'Efectivo recibido (MXN)', min_value=0.0, value=float(amount),
+            step=10.0, format='%.2f', disabled=method != 'Efectivo')
+        change = max(0.0, float(received) - float(amount)) if method == 'Efectivo' else 0.0
+        if method == 'Efectivo':
+            st.caption(f'Cambio a entregar: **{_mxn(change)}**')
+        reference = st.text_input(
+            'Referencia', placeholder='Folio de transferencia, voucher u observación')
+        actions = st.columns(2)
+        cancel = actions[0].form_submit_button(
+            'Cancelar', icon=':material/close:', width='stretch')
+        pay = actions[1].form_submit_button(
+            'Aplicar abono', type='primary', icon=':material/check:', width='stretch')
+    if cancel:
+        st.rerun()
+    if pay:
+        try:
+            repository.register_payment(
+                account.id, amount, method, _actor_name(), reference, received,
+                register_id=_active_cash_register().id)
+            _queue_activity_notice(
+                'Abono aplicado',
+                f'Se registró {_mxn(amount)} para {account.party_name}.',
+                icon=':material/payments:')
+            st.rerun()
+        except Exception as error:
+            st.error(str(error), icon=':material/error:')
+
+
+@st.dialog('Detalle de la cuenta', icon=':material/receipt_long:', width='large')
+def _credit_account_detail_dialog(account_id):
+    repository = RepositoryFactory.get_credit_account_repository()
+    account = next(
+        (item for item in repository.active_accounts() if item.id == account_id), None)
+    if account is None:
+        st.info('La cuenta ya fue liquidada y salió de la cartera activa.',
+                icon=':material/task_alt:')
+        return
+    state = _credit_account_state(account)
+    st.markdown(f'### {account.party_name}')
+    st.caption(f'Cuenta #{account.id} · {account.account_type} · {state}')
+    metrics = st.columns(3)
+    metrics[0].metric('Importe original', _mxn(account.original_amount.amount), border=True)
+    metrics[1].metric('Saldo pendiente', _mxn(account.balance.amount), border=True)
+    metrics[2].metric('Vence', account.due_date.strftime('%d/%m/%Y'), border=True)
+    with st.container(border=True):
+        st.write(f'**Concepto:** {account.concept}')
+        st.write(f'**Referencia:** {account.reference or "Sin referencia"}')
+        st.caption(
+            f'Registrada por {account.created_by} · '
+            f'{account.created_at:%d/%m/%Y %H:%M}')
+    payments = repository.payments_for(account.id)
+    st.markdown('#### Historial de abonos')
+    if payments:
+        st.dataframe(pd.DataFrame([{
+            'Fecha': payment.created_at,
+            'Importe': float(payment.amount.amount),
+            'Método': payment.payment_method,
+            'Referencia': payment.reference,
+            'Recibió': payment.received_by,
+        } for payment in payments]), hide_index=True, width='stretch',
+            column_config={
+                'Fecha': st.column_config.DatetimeColumn(format='DD/MM/YYYY HH:mm'),
+                'Importe': st.column_config.NumberColumn(format='$ %.2f MXN'),
+            })
+    else:
+        st.caption('Aún no se han registrado abonos.')
+    customer = next((item for item in RepositoryFactory.get_operations_repository().get_customers()
+                     if item.name.casefold() == account.party_name.casefold()), None)
+    actions = st.container(horizontal=True)
+    if customer and customer.phone:
+        phone = ''.join(character for character in customer.phone if character.isdigit())
+        reminder = quote(
+            f'Hola {customer.name}, te recordamos que tienes un saldo pendiente de '
+            f'{_mxn(account.balance.amount)} con vencimiento '
+            f'{account.due_date:%d/%m/%Y}.')
+        actions.link_button(
+            'Enviar recordatorio', f'https://wa.me/{phone}?text={reminder}',
+            icon=':material/chat:', width='content')
+    actions.caption('Cierra esta ficha para registrar un abono desde la cartera.')
+
+
 def _render_credit_accounts():
-    _hero('Créditos y cartera', 'Controla saldos, vencimientos y abonos sin servicios externos.', 'COBRANZA · PROVEEDORES')
-    repository = RepositoryFactory.get_credit_account_repository(); summary = repository.summary()
-    cards = st.columns(4)
-    cards[0].metric('Por cobrar', f"${summary['to_collect']:,.2f}")
-    cards[1].metric('Por pagar', f"${summary['to_pay']:,.2f}")
-    cards[2].metric('Vencidas', len(summary['overdue']))
-    cards[3].metric('Vencen en 3 días', len(summary['due_soon']))
-    credit_form_version = _form_version('credit_account_new')
-    with st.expander('Registrar cuenta', icon=':material/add_card:'):
-        with st.form(f'credit_account_form_{credit_form_version}', enter_to_submit=False):
-            kind = st.selectbox('Tipo', ('Cobrar', 'Pagar'))
-            party = st.text_input('Cliente o proveedor')
-            concept = st.text_input('Concepto')
-            first, second = st.columns(2); amount = first.number_input('Importe total', min_value=.01, step=1.0); due = second.date_input('Vencimiento', min_value=mexico_today())
-            reference = st.text_input('Referencia'); down = st.number_input('Enganche en efectivo', min_value=0.0, step=1.0)
-            create = st.form_submit_button('Registrar cuenta', type='primary')
-        if create:
-            try:
-                account = repository.create(kind, party, concept, amount, due, _actor_name(), reference, down)
-                _queue_activity_notice(
-                    'Cuenta registrada',
-                    f'La cuenta #{account.id} de {account.party_name} quedó registrada correctamente.',
-                    icon=':material/add_card:')
-                _reset_form('credit_account_new')
-                st.rerun()
-            except Exception as error: st.error(str(error))
+    _hero('Créditos y cartera',
+          'Consulta vencimientos, registra abonos y da seguimiento desde una sola vista.',
+          'COBRANZA · FLUJO DE EFECTIVO')
+    repository = RepositoryFactory.get_credit_account_repository()
+    summary = repository.summary()
     accounts = repository.active_accounts()
-    if not accounts:
-        st.info('No hay cuentas pendientes.'); return
-    st.dataframe(pd.DataFrame([{'#': a.id, 'Tipo': a.account_type, 'Responsable': a.party_name, 'Concepto': a.concept, 'Saldo': float(a.balance.amount), 'Vence': a.due_date, 'Estado': a.status} for a in accounts]), hide_index=True, width='stretch', column_config={'Saldo': st.column_config.NumberColumn(format='$ %.2f')})
-    by_label = {f'#{a.id} · {a.party_name} · ${float(a.balance.amount):,.2f}': a for a in accounts}
-    selected = st.selectbox('Registrar abono', list(by_label), index=None, placeholder='Selecciona una cuenta')
-    if selected:
-        account = by_label[selected]
-        payment_form_version = _form_version(f'credit_payment_{account.id}')
-        with st.form(f'credit_payment_{account.id}_{payment_form_version}', enter_to_submit=False):
-            amount = st.number_input('Abono', min_value=.01, max_value=float(account.balance.amount), step=1.0)
-            method = st.selectbox('Método de pago', ('Efectivo', 'Transferencia', 'Tarjeta', 'Otro'))
-            received = st.number_input('Efectivo recibido', min_value=amount, value=amount, step=1.0, disabled=method != 'Efectivo')
-            reference = st.text_input('Referencia del abono'); pay = st.form_submit_button('Aplicar abono', type='primary')
-        if pay:
-            try:
-                repository.register_payment(account.id, amount, method, _actor_name(), reference, received)
-                _queue_activity_notice(
-                    'Abono aplicado',
-                    f'Se registró un abono de {_mxn(amount)} para {account.party_name}.',
-                    icon=':material/payments:')
-                _reset_form(f'credit_payment_{account.id}')
-                st.rerun()
-            except Exception as error: st.error(str(error))
+    overdue_collect = [
+        account for account in summary['overdue'] if account.account_type == 'Cobrar']
+    overdue_balance = sum(
+        float(account.balance.amount) for account in overdue_collect)
+
+    with st.container(horizontal=True):
+        st.metric('Por cobrar', _mxn(summary['to_collect']), border=True)
+        st.metric('Vencido por cobrar', _mxn(overdue_balance),
+                  delta=f'{len(overdue_collect)} cuenta(s)',
+                  delta_color='inverse' if overdue_collect else 'normal', border=True)
+        st.metric('Por pagar', _mxn(summary['to_pay']), border=True)
+        st.metric('Próximas a vencer', len(summary['due_soon']), border=True)
+
+    controls = st.container(horizontal=True, vertical_alignment='bottom')
+    portfolio_filter = controls.segmented_control(
+        'Vista', ('Todas', 'Por cobrar', 'Por pagar', 'Vencidas', 'Próximas'),
+        default='Todas', selection_mode='single', key='credit_portfolio_filter') or 'Todas'
+    search = controls.text_input(
+        'Buscar', placeholder='Cliente, proveedor, concepto o referencia',
+        icon=':material/search:', key='credit_portfolio_search').strip().casefold()
+
+    visible = []
+    for account in accounts:
+        state = _credit_account_state(account)
+        if portfolio_filter == 'Por cobrar' and account.account_type != 'Cobrar':
+            continue
+        if portfolio_filter == 'Por pagar' and account.account_type != 'Pagar':
+            continue
+        if portfolio_filter == 'Vencidas' and state != 'Vencida':
+            continue
+        if portfolio_filter == 'Próximas' and state not in ('Vence hoy', 'Próxima'):
+            continue
+        haystack = ' '.join((account.party_name, account.concept,
+                             account.reference or '')).casefold()
+        if search and search not in haystack:
+            continue
+        visible.append(account)
+
+    if visible:
+        portfolio_event = st.dataframe(pd.DataFrame([{
+            'Cuenta': account.id,
+            'Tipo': account.account_type,
+            'Cliente o proveedor': account.party_name,
+            'Concepto': account.concept,
+            'Saldo': float(account.balance.amount),
+            'Avance': max(0.0, min(
+                1.0, 1 - float(account.balance.amount)
+                / max(.01, float(account.original_amount.amount)))),
+            'Vencimiento': account.due_date,
+            'Estado': _credit_account_state(account),
+        } for account in visible]), hide_index=True, width='stretch',
+            on_select='rerun', selection_mode='single-row', key='credit_portfolio_table',
+            column_config={
+                'Cuenta': st.column_config.NumberColumn(format='#%d'),
+                'Saldo': st.column_config.NumberColumn(format='$ %.2f MXN'),
+                'Avance': st.column_config.ProgressColumn(
+                    'Pagado', min_value=0.0, max_value=1.0, format='percent'),
+                'Vencimiento': st.column_config.DateColumn(format='DD/MM/YYYY'),
+            })
+        selected_rows = portfolio_event.selection.rows
+        selected_account = (
+            visible[selected_rows[0]]
+            if selected_rows and selected_rows[0] < len(visible) else None)
+    else:
+        selected_account = None
+        if accounts:
+            st.info('No hay cuentas que coincidan con los filtros.', icon=':material/search_off:')
+        else:
+            st.success('No hay saldos pendientes en la cartera.', icon=':material/task_alt:')
+
+    actions = st.container(horizontal=True, horizontal_alignment='right')
+    if actions.button('Nueva cuenta', type='primary', icon=':material/add_card:'):
+        _credit_account_create_dialog()
+    if actions.button(
+            'Ver detalle', icon=':material/visibility:', disabled=selected_account is None):
+        _credit_account_detail_dialog(selected_account.id)
+    if actions.button(
+            'Registrar abono', icon=':material/payments:', disabled=selected_account is None):
+        _credit_payment_dialog(selected_account.id)
+    st.caption('Selecciona una fila para consultar su historial o registrar un abono.')
 
 
 def _render_supply():
@@ -6353,6 +7469,9 @@ def _render_business_profile():
             st.caption(
                 'El encabezado identifica al negocio en sus documentos. El agradecimiento '
                 'se imprime únicamente en tickets de Nueva venta y Venta express.')
+            ticket_prefix = st.text_input(
+                'Prefijo de folio', value=getattr(profile, 'ticket_prefix', 'V') or 'V',
+                max_chars=12, help='Ejemplo: TDA, CAJA1 o V. El número consecutivo se conserva.')
             receipt_header = st.text_area(
                 'Encabezado del ticket', value=profile.receipt_header or '', height=80,
                 max_chars=300, placeholder='Promoción, sucursal o mensaje destacado')
@@ -6364,6 +7483,17 @@ def _render_business_profile():
                 'Política de cambios o devoluciones', value=profile.return_policy or '',
                 height=100, max_chars=500,
                 placeholder='Ej. Cambios dentro de 15 días presentando este ticket.')
+            with st.container(border=True):
+                st.caption('VISTA PREVIA DEL TICKET')
+                st.markdown(f'**{business_name or profile.business_name or "Mi negocio"}**')
+                if receipt_header.strip():
+                    st.caption(receipt_header.strip())
+                st.markdown(f'`{re.sub(r"[^A-Za-z0-9]+", "", ticket_prefix).upper()[:12] or "V"}-000123`')
+                st.caption('1 × Producto de ejemplo  ·  $100.00 MXN')
+                st.markdown('**TOTAL  $100.00 MXN**')
+                st.caption(receipt_footer.strip() or 'Gracias por su compra.')
+                if return_policy.strip():
+                    st.caption(f'Cambios: {return_policy.strip()}')
 
         submitted = st.form_submit_button(
             'Guardar y aplicar perfil', type='primary', icon=':material/save:',
@@ -6399,6 +7529,7 @@ def _render_business_profile():
                 'city': city.strip(), 'state': state.strip(),
                 'postal_code': postal_code.strip(), 'tax_id': tax_id.strip().upper(),
                 'tax_regime': tax_regime.strip(), 'receipt_header': receipt_header.strip(),
+                'ticket_prefix': re.sub(r'[^A-Za-z0-9]+', '', ticket_prefix).upper()[:12] or 'V',
                 'receipt_footer': receipt_footer.strip(), 'return_policy': return_policy.strip(),
                 'brand_color': brand_color, 'app_background_color': app_background_color,
                 'app_surface_color': app_surface_color, 'app_text_color': app_text_color,
@@ -7052,9 +8183,8 @@ def _render_returns():
 
 
 def _navigate_to_page(target):
-    """Callback de navegación; se ejecuta antes de crear el widget del menú."""
+    """Navega sin mutar widgets que ya pudieron renderizarse en este rerun."""
     st.session_state['page'] = target
-    st.session_state['command_center_page_jump'] = target
 
 
 def _navigate_register_to_page(register_id, target):
@@ -7065,8 +8195,7 @@ def _navigate_register_to_page(register_id, target):
 
 def _open_sales_history():
     """Abre Ventas directamente en el historial de operaciones."""
-    st.session_state['page'] = 'Ventas'
-    st.session_state['sales_history_open'] = True
+    _navigate_to_page('Movimientos recientes')
 
 
 def _navigate_to_cash_withdrawal(suggested_amount):
@@ -7084,6 +8213,70 @@ def _sidebar_nav_button(page_name, label, icon, key):
         on_click=_navigate_to_page, args=(page_name,))
 
 
+def _render_payment_settings():
+    _hero('Métodos de pago', 'Define qué opciones estarán disponibles al momento de cobrar.',
+          'CONFIGURACIÓN · VENTAS')
+    repository = RepositoryFactory.get_business_profile_repository()
+    profile = repository.get_profile()
+    enabled = list(_enabled_payment_methods())
+    with st.form('payment_methods_settings_form', enter_to_submit=False):
+        selected = st.multiselect(
+            'Métodos disponibles en caja', PAYMENT_METHODS, default=enabled,
+            help='Desactiva temporalmente un método si no deseas que aparezca al cobrar.')
+        st.info('Efectivo debe permanecer activo para permitir cambio y conciliación de caja.',
+                icon=':material/info:')
+        submitted = st.form_submit_button('Guardar métodos de pago', type='primary',
+                                          icon=':material/save:', width='stretch')
+    if submitted:
+        if not selected:
+            st.error('Activa al menos un método de pago.', icon=':material/error:')
+        elif 'Efectivo' not in selected:
+            st.error('Efectivo debe permanecer activo para la operación de caja.', icon=':material/error:')
+        else:
+            repository.save_profile({'enabled_payment_methods': json.dumps(selected)})
+            _queue_activity_notice('Métodos de pago actualizados',
+                                   f'Se habilitaron: {", ".join(selected)}.',
+                                   icon=':material/payments:')
+            st.rerun()
+    st.subheader('Guía de uso')
+    st.caption('Los cambios aplican a nuevas ventas; los tickets y cortes anteriores conservan su información.')
+
+
+def _render_settings_hub():
+    """Centro visual para localizar configuraciones sin una página interminable."""
+    _hero('Configuración', 'Administra los datos y opciones que definen cómo opera tu punto de venta.',
+          'ADMINISTRACIÓN · AJUSTES')
+    groups = (
+        ('Negocio', 'Nombre, contacto, identidad visual y datos del ticket.',
+         'Mi perfil', ':material/storefront:'),
+        ('Cajas y sucursales', 'Crea cajas, selecciona la activa y consulta su operación.',
+         'Tablero multicaja', ':material/point_of_sale:'),
+        ('Detalles de ventas', 'Configura vendedores, clientes, cobros y seguimiento comercial.',
+         'Métodos de pago', ':material/receipt_long:'),
+        ('Tickets y documentos', 'Personaliza encabezados, identidad y comprobantes de venta.',
+         'Mi perfil', ':material/print:'),
+        ('Catálogo web', 'Publica productos, fotos, contacto y horarios para clientes.',
+         'Mi página web', ':material/language:'),
+        ('Inventario', 'Define productos, unidades de medida, niveles de stock y proveedores.',
+         'Inventario', ':material/inventory_2:'),
+        ('Seguridad y seguimiento', 'Gestiona incidencias, actividad y controles operativos.',
+         'Auditoría', ':material/security:'),
+        ('Ayuda del sistema', 'Consulta guías de uso, caja, ventas, tickets y configuración.',
+         'Asistente ECCOS', ':material/support_agent:'),
+    )
+    grid = st.container(height=650, border=False, key='settings_hub_grid')
+    for row_start in range(0, len(groups), 3):
+        cards = grid.columns(3, gap='medium')
+        for card, (title, detail, target, icon) in zip(cards, groups[row_start:row_start + 3]):
+            with card.container(border=True, height=210):
+                st.markdown(f'### {icon} {title}')
+                st.caption(detail)
+                st.space('small')
+                st.button('Abrir configuración', icon=':material/arrow_forward:',
+                          width='stretch', key=f'settings_hub_{target}_{title}',
+                          on_click=_navigate_to_page, args=(target,))
+
+
 def _render_sidebar_navigation(is_admin):
     try:
         notification_count = sum(
@@ -7099,14 +8292,16 @@ def _render_sidebar_navigation(is_admin):
             ('Operación diaria', (
                 ('Tablero', 'Tablero', ':material/dashboard:'),
                 ('Ventas', 'Nueva venta', ':material/point_of_sale:'),
+                ('Clientes', 'Clientes', ':material/groups:'),
+                ('Movimientos recientes', 'Movimientos recientes', ':material/receipt_long:'),
                 ('Inventario', 'Inventario', ':material/inventory_2:'),
                 ('Movimientos', 'Entradas y mermas', ':material/sync_alt:'),
             )),
             ('Caja', (
-                ('Tablero multicaja', 'Tablero multicaja', ':material/point_of_sale:'),
+                ('Tablero multicaja', 'Tablero multicaja', ':material/store:'),
                 ('Apertura de caja', 'Apertura de caja', ':material/lock_open:'),
                 ('Corte de caja', 'Cierre de caja', ':material/lock:'),
-                ('Historial de turnos y cortes', 'Historial de turnos y cortes', ':material/receipt_long:'),
+                ('Historial de turnos y cortes', 'Historial de turnos y cortes', ':material/history:'),
             )),
         )
         secondary_groups = (
@@ -7118,13 +8313,14 @@ def _render_sidebar_navigation(is_admin):
                 ('Vendedores', 'Vendedores', ':material/badge:'),
             )),
             ('Gestión del negocio', ':material/store:', (
-                ('Gastos', 'Gastos', ':material/payments:'),
+                ('Métodos de pago', 'Métodos de pago', ':material/credit_card:'),
+                ('Gastos', 'Gastos', ':material/receipt:'),
                 ('Devoluciones', 'Devoluciones', ':material/assignment_return:'),
-                ('Clientes', 'Clientes', ':material/groups:'),
                 ('Abastecimiento', 'Abastecimiento', ':material/local_shipping:'),
-                ('Auditoría', 'Actividad y auditoría', ':material/history:'),
+                ('Auditoría', 'Actividad y auditoría', ':material/manage_search:'),
             )),
             ('Análisis y crecimiento', ':material/monitoring:', (
+                ('Salud operativa', 'Salud operativa', ':material/health_and_safety:'),
                 ('Crecimiento gratis', 'Crecimiento gratis', ':material/trending_up:'),
                 ('Reportes', 'Reportes', ':material/description:'),
                 ('Estadísticas', 'Estadísticas', ':material/query_stats:'),
@@ -7136,9 +8332,11 @@ def _render_sidebar_navigation(is_admin):
             ('Ventas', (
                 ('Mi jornada', 'Mi jornada', ':material/dashboard:'),
                 ('Nueva venta', 'Nueva venta', ':material/point_of_sale:'),
+                ('Movimientos recientes', 'Movimientos recientes', ':material/receipt_long:'),
                 ('Cotizaciones', 'Cotizaciones', ':material/request_quote:'),
                 ('Inventario', 'Consultar inventario', ':material/inventory_2:'),
                 ('Venta express', 'Venta express', ':material/bolt:'),
+                ('Clientes', 'Clientes', ':material/groups:'),
             )),
             ('Caja', (
                 ('Apertura de caja', 'Apertura de caja', ':material/lock_open:'),
@@ -7326,10 +8524,14 @@ def _render_help_assistant():
 
 ADMIN_PAGES = {
     'Tablero': _render_dashboard,
+    'Salud operativa': _render_business_health,
+    'Configuración': _render_settings_hub,
+    'Métodos de pago': _render_payment_settings,
     'Centro de incidencias': _render_incidents,
     'Créditos y cartera': _render_credit_accounts,
     'Vendedores': _render_sellers,
     'Ventas': _render_sales,
+    'Movimientos recientes': _render_recent_sales,
     'Venta express': _render_express_sale, 'Cotizaciones': _render_quotes,
     'Inventario': _render_inventory,
     'Movimientos': _render_inventory_movements,
@@ -7347,11 +8549,13 @@ SELLER_PAGES = {
     'Mi jornada': _render_seller_dashboard,
     'Centro de incidencias': _render_incidents,
     'Nueva venta': _render_sales,
+    'Movimientos recientes': _render_recent_sales,
     'Cotizaciones': _render_quotes,
     'Inventario': _render_inventory_readonly,
     'Venta express': _render_express_sale,
     'Apertura de caja': _render_cash_opening,
     'Corte de caja': _render_cash_close,
+    'Clientes': _render_customers,
     'Mi contraseña': _render_change_password,
     'Asistente ECCOS': _render_help_assistant,
 }
@@ -7418,20 +8622,26 @@ def _render_app():
         active_register = _render_cash_register_selector()
         st.caption(f'Operando en: {active_register.name}')
 
-        utility_columns = st.columns(2, gap='small')
+        st.markdown('<div class="sidebar-section-label">Accesos rápidos</div>',
+                    unsafe_allow_html=True)
         if _is_administrator():
-            utility_columns[0].button(
+            st.button(
+                'Configuración del sistema', icon=':material/settings:', width='stretch',
+                type='primary' if st.session_state.get('page') == 'Configuración' else 'secondary',
+                key='sidebar_utility_settings', on_click=_navigate_to_page,
+                args=('Configuración',))
+            st.button(
                 'Mi perfil', icon=':material/account_circle:', width='stretch',
                 type='primary' if st.session_state.get('page') == 'Mi perfil' else 'secondary',
                 key='sidebar_utility_profile', on_click=_navigate_to_page,
                 args=('Mi perfil',))
         else:
-            utility_columns[0].button(
+            st.button(
                 'Mi jornada', icon=':material/badge:', width='stretch',
                 type='primary' if st.session_state.get('page') == 'Mi jornada' else 'secondary',
                 key='sidebar_utility_shift', on_click=_navigate_to_page,
                 args=('Mi jornada',))
-        utility_columns[1].button(
+        st.button(
             'Ayuda', icon=':material/support_agent:', width='stretch',
             type='primary' if st.session_state.get('page') == 'Asistente ECCOS' else 'secondary',
             key='sidebar_utility_help', on_click=_navigate_to_page,

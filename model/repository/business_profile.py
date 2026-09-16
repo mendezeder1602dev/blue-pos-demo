@@ -16,7 +16,8 @@ class BusinessProfileRepository:
     EDITABLE_FIELDS = {
         'business_name', 'legal_name', 'business_type', 'slogan', 'owner_name',
         'phone', 'whatsapp', 'email', 'website', 'address', 'city', 'state',
-        'postal_code', 'tax_id', 'tax_regime', 'receipt_header', 'receipt_footer',
+        'postal_code', 'tax_id', 'tax_regime', 'receipt_header', 'ticket_prefix', 'receipt_footer',
+        'enabled_payment_methods',
         'return_policy', 'brand_color', 'app_background_color', 'app_surface_color',
         'app_text_color', 'document_primary_color', 'document_text_color',
         'logo_data', 'logo_mime',

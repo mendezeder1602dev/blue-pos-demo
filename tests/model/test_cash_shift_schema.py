@@ -77,6 +77,40 @@ class CashShiftSchemaMigrationTest(unittest.TestCase):
             engine.dispose()
             self.assertEqual(applied, 1)
 
+    def test_adds_customer_country_and_postal_code_to_existing_database(self):
+        with tempfile.TemporaryDirectory() as folder:
+            database_path = Path(folder) / 'legacy-customers.db'
+            url = f"sqlite:///{database_path.as_posix()}"
+            engine = create_engine(url, future=True)
+            with engine.begin() as connection:
+                connection.execute(text(
+                    'CREATE TABLE customers ('
+                    'id INTEGER PRIMARY KEY, name VARCHAR(120) NOT NULL UNIQUE, '
+                    "phone VARCHAR(40) DEFAULT '', address VARCHAR(300) DEFAULT '', "
+                    "email VARCHAR(120) DEFAULT '', tax_id VARCHAR(40) DEFAULT '', "
+                    "notes VARCHAR(400) DEFAULT '', is_active BOOLEAN DEFAULT 1, "
+                    "loyalty_points INTEGER DEFAULT 0, lifetime_spend TEXT DEFAULT '0.00', "
+                    'created_at DATETIME, updated_at DATETIME)'))
+                connection.execute(text(
+                    "INSERT INTO customers (name, phone, created_at) "
+                    "VALUES ('Cliente heredado', '9931234567', CURRENT_TIMESTAMP)"))
+            engine.dispose()
+
+            create_database(url)
+
+            migrated_engine = create_engine(url, future=True)
+            columns = {
+                column['name'] for column in inspect(migrated_engine).get_columns('customers')
+            }
+            with migrated_engine.connect() as connection:
+                country = connection.execute(text(
+                    "SELECT phone_country FROM customers WHERE name = 'Cliente heredado'"
+                )).scalar_one()
+            migrated_engine.dispose()
+            self.assertIn('phone_country', columns)
+            self.assertIn('postal_code', columns)
+            self.assertEqual(country, 'MX')
+
 
 if __name__ == '__main__':
     unittest.main()

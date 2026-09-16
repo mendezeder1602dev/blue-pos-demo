@@ -179,7 +179,8 @@ class ProductRepository(RepositoryObserver):
                         price=CUPMoney(f"{item['price']:.2f}"),
                         cost=CUPMoney(f"{item['cost']:.2f}"), quantity=item['quantity'],
                         barcode=item['barcode'], category=item['category'],
-                        supplier=item['supplier'], minimum_stock=item['minimum_stock'])
+                        supplier=item['supplier'], unit_of_measure=item.get('unit_of_measure', 'Unidad'), minimum_stock=item['minimum_stock'],
+                        maximum_stock=item.get('maximum_stock', 0))
                     self.__check_name_is_not_used(product)
                     self.__check_barcode_can_be_used(product)
                     self.__session.add(product)
@@ -206,7 +207,9 @@ class ProductRepository(RepositoryObserver):
                 product.barcode = item['barcode']
                 product.category = item['category']
                 product.supplier = item['supplier']
+                product.unit_of_measure = item.get('unit_of_measure', product.unit_of_measure or 'Unidad')
                 product.minimum_stock = item['minimum_stock']
+                product.maximum_stock = item.get('maximum_stock', 0)
                 delta = resulting_stock - previous_stock
                 if delta:
                     self.__session.add(StockMovement(
@@ -290,8 +293,12 @@ class ProductRepository(RepositoryObserver):
         old.image_path = new.image_path if new.image_path is not None else old.image_path
         old.category = new.category if new.category is not None else old.category
         old.supplier = new.supplier if new.supplier is not None else old.supplier
+        old.unit_of_measure = (new.unit_of_measure if new.unit_of_measure is not None
+                               else old.unit_of_measure)
         old.minimum_stock = (new.minimum_stock if new.minimum_stock is not None
                              else old.minimum_stock)
+        old.maximum_stock = (new.maximum_stock if new.maximum_stock is not None
+                             else old.maximum_stock)
         old.wholesale_min_quantity = (new.wholesale_min_quantity
                                       if new.wholesale_min_quantity is not None
                                       else old.wholesale_min_quantity)

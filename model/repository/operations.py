@@ -8,6 +8,9 @@ from sqlalchemy import or_, select
 from model.entity.models import (AuditLog, Customer, HeldSale, HeldSaleItem,
                                  OperationalIncident, Product, ReturnLossRequest,
                                  Sale, StockMovement)
+from model.customer_contact import (
+    normalize_country, normalize_email, normalize_phone, normalize_postal_code,
+)
 from model.util.monetary_types import CUPMoney
 from model.authorization import require_role
 from model.timezone import mexico_now
@@ -254,23 +257,89 @@ class OperationsRepository:
             self.__session.delete(held)
             self.__session.commit()
 
-    def add_customer(self, name, phone='', email='', tax_id='', notes=''):
-        require_role('superuser', 'seller')
+    @staticmethod
+    def _validated_customer_data(name, phone, address, email='', tax_id='', notes='',
+                                 phone_country='MX', postal_code=''):
         name = (name or '').strip()
+        address = (address or '').strip()
         if len(name) < 2:
-            raise ValueError('Escribe el nombre del cliente.')
-        existing = self.__session.scalar(select(Customer).where(Customer.name.ilike(name)))
+            raise ValueError('Escribe el nombre completo del cliente.')
+        if len(name) > 120:
+            raise ValueError('El nombre del cliente no puede superar 120 caracteres.')
+        if len(address) < 5:
+            raise ValueError('Captura la dirección completa del cliente.')
+        if len(address) > 300:
+            raise ValueError('La dirección no puede superar 300 caracteres.')
+        phone_country = normalize_country(phone_country)
+        phone = normalize_phone(phone, phone_country)
+        email = normalize_email(email)
+        postal_code = normalize_postal_code(postal_code, phone_country)
+        tax_id = (tax_id or '').strip().upper()
+        notes = (notes or '').strip()
+        if len(tax_id) > 40:
+            raise ValueError('El RFC o identificación no puede superar 40 caracteres.')
+        if len(notes) > 400:
+            raise ValueError('Las notas no pueden superar 400 caracteres.')
+        return {
+            'name': name, 'phone': phone, 'phone_country': phone_country,
+            'address': address, 'postal_code': postal_code, 'email': email,
+            'tax_id': tax_id, 'notes': notes,
+        }
+
+    def add_customer(self, name, phone='', email='', tax_id='', notes='', address='',
+                     phone_country='MX', postal_code=''):
+        require_role('superuser', 'seller')
+        data = self._validated_customer_data(
+            name, phone, address, email, tax_id, notes, phone_country, postal_code)
+        existing = self.__session.scalar(
+            select(Customer).where(Customer.name.ilike(data['name'])))
         if existing is not None:
             raise ValueError('Ya existe un cliente con ese nombre.')
-        customer = Customer(name=name, phone=phone.strip(), email=email.strip(),
-                            tax_id=tax_id.strip(), notes=notes.strip())
+        customer = Customer(**data, updated_at=mexico_now())
         self.__session.add(customer)
+        self.__session.commit()
+        return customer
+
+    def update_customer(self, customer_id, name, phone, address, email='', tax_id='',
+                        notes='', actor='Administrador', phone_country='MX', postal_code=''):
+        require_role('superuser', 'seller')
+        customer = self.__session.get(Customer, int(customer_id))
+        if customer is None or not customer.is_active:
+            raise ValueError('El cliente ya no está disponible.')
+        data = self._validated_customer_data(
+            name, phone, address, email, tax_id, notes, phone_country, postal_code)
+        duplicate = self.__session.scalar(select(Customer).where(
+            Customer.name.ilike(data['name']), Customer.id != customer.id))
+        if duplicate is not None:
+            raise ValueError('Ya existe otro cliente con ese nombre.')
+        for field, value in data.items():
+            setattr(customer, field, value)
+        customer.updated_at = mexico_now()
+        self.__session.add(AuditLog(
+            event_type='cliente_actualizado', actor=(actor or 'Sistema').strip(),
+            entity_type='customer', entity_id=str(customer.id),
+            detail=f'Datos de contacto actualizados para {customer.name}.'))
         self.__session.commit()
         return customer
 
     def get_customers(self):
         return list(self.__session.scalars(
             select(Customer).where(Customer.is_active == True).order_by(Customer.name)
+        ).all())
+
+    def search_customers(self, term='', limit=20):
+        """Filtra el directorio activo para autocompletado sin cargar historiales."""
+        clean_term = (term or '').strip()
+        statement = select(Customer).where(Customer.is_active == True)
+        if clean_term:
+            pattern = f'%{clean_term}%'
+            statement = statement.where(or_(
+                Customer.name.ilike(pattern), Customer.phone.ilike(pattern),
+                Customer.email.ilike(pattern), Customer.address.ilike(pattern),
+                Customer.postal_code.ilike(pattern), Customer.tax_id.ilike(pattern),
+            ))
+        return list(self.__session.scalars(
+            statement.order_by(Customer.name).limit(max(1, min(int(limit), 50)))
         ).all())
 
     def archive_customer(self, customer_id):

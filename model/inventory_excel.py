@@ -20,7 +20,7 @@ IMPORT_ACTIONS = (ACTION_CREATE, ACTION_ADD, ACTION_REPLACE, ACTION_SKIP)
 COLUMNS = (
     'Nombre', 'Descripción', 'Código de barras', 'Precio de costo',
     'Precio de venta', 'Cantidad disponible', 'Categoría', 'Proveedor',
-    'Existencia mínima',
+    'Unidad de medida', 'Existencia mínima', 'Existencia máxima',
 )
 REQUIRED_COLUMNS = (
     'Nombre', 'Descripción', 'Precio de costo', 'Precio de venta',
@@ -70,12 +70,12 @@ def generate_inventory_template():
         cell.font = Font(color='FFFFFF', bold=True)
         cell.fill = header_fill
         cell.alignment = Alignment(horizontal='center')
-    widths = (28, 38, 20, 18, 18, 20, 22, 24, 18)
+    widths = (28, 38, 20, 18, 18, 20, 22, 24, 20, 18, 18)
     for index, width in enumerate(widths, start=1):
         sheet.column_dimensions[chr(64 + index)].width = width
     sheet.column_dimensions['C'].number_format = '@'
     sheet.freeze_panes = 'A2'
-    sheet.auto_filter.ref = 'A1:I1'
+    sheet.auto_filter.ref = 'A1:K1'
 
     instructions = workbook.create_sheet('Instrucciones')
     instructions.append(('Cómo preparar el archivo',))
@@ -84,8 +84,8 @@ def generate_inventory_template():
         'No cambies los encabezados de la hoja Inventario.',
         'Nombre, descripción, costo, precio, cantidad y categoría son obligatorios.',
         'Precio de costo y precio de venta deben ser mayores que cero.',
-        'Cantidad disponible y existencia mínima deben ser números enteros de cero o más.',
-        'Código de barras y proveedor son opcionales.',
+        'Cantidad disponible y existencias mínima/máxima deben ser enteros de cero o más.',
+        'Código de barras, proveedor y unidad de medida son opcionales; si se omite se usa Unidad.',
         'Configura los códigos de barras como texto para conservar ceros iniciales.',
         f'Puedes importar hasta {MAX_IMPORT_ROWS:,} productos por archivo.',
         'Puntos ECCOS mostrará una vista previa editable antes de guardar cualquier dato.',
@@ -235,8 +235,11 @@ def validate_import_rows(rows, products):
                     source.get('Cantidad disponible'), 'la cantidad disponible'),
                 'category': category,
                 'supplier': supplier,
+                'unit_of_measure': ' '.join(str(source.get('Unidad de medida') or 'Unidad').split()) or 'Unidad',
                 'minimum_stock': _integer_value(
                     source.get('Existencia mínima'), 'la existencia mínima', default=5),
+                'maximum_stock': _integer_value(
+                    source.get('Existencia máxima'), 'la existencia máxima', default=0),
             })
         except ValueError as error:
             errors.append(f'Fila {index}: {error}')

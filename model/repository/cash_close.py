@@ -11,7 +11,7 @@ class CashCloseRepository:
         self.__session = session
 
     def insert(self, cash_close: CashClose) -> CashClose:
-        require_role('superuser')
+        require_role('superuser', 'seller')
         if cash_close.opening_id is not None and self.get_for_opening(cash_close.opening_id):
             raise ValueError('Este turno ya tiene un cierre de caja.')
         if cash_close.opening_id is not None:

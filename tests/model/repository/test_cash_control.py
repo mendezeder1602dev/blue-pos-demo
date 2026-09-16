@@ -45,11 +45,21 @@ class TestCashControlWorkflow(unittest.TestCase):
         self.assertEqual(opening.source_close_id, previous_close.id)
         self.assertEqual(float(opening.opening_amount.amount), 1250.0)
 
-    def test_seller_cannot_confirm_opening(self):
+    def test_seller_can_confirm_opening(self):
+        opening = CashControlRepository(self.session).open_day(CashOpening(
+            date=mexico_today(), opening_amount=CUPMoney('500.00'),
+            cash_limit=CUPMoney('3000.00'), opened_by='Vendedor',
+            shift_responsible='Vendedor',
+        ), 'seller')
+
+        self.assertEqual(opening.opened_by, 'Vendedor')
+        self.assertEqual(opening.shift_responsible, 'Vendedor')
+
+    def test_unknown_role_cannot_confirm_opening(self):
         with self.assertRaises(PermissionError):
             CashControlRepository(self.session).open_day(CashOpening(
                 date=mexico_today(), opening_amount=CUPMoney('500.00'),
-                cash_limit=CUPMoney('3000.00'), opened_by='Vendedor',
+                cash_limit=CUPMoney('3000.00'), opened_by='Sin permiso',
             ), 'store')
 
     def test_multiple_shifts_can_open_and_close_on_same_day(self):

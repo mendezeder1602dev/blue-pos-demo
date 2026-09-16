@@ -10,3 +10,5 @@ Pillow>=11,<13
 tzdata>=2026.1
 psycopg2-binary>=2.9,<3
 setuptools>=70,<85  # Compatibilidad y reconstrucción del entorno Python 3.12.
+phonenumbers==9.0.39
+email-validator==2.3.0

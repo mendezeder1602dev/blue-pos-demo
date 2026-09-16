@@ -7,6 +7,7 @@ from model.util.monetary_types import CUPMoney
 
 class CashControlRepository:
     ADMIN_ROLE = 'superuser'
+    CASHIER_ROLES = ('superuser', 'seller')
     MOVEMENT_TYPES = ('Retiro', 'Entrada')
 
     def __init__(self, session):
@@ -16,6 +17,11 @@ class CashControlRepository:
     def _require_administrator(role):
         if role != CashControlRepository.ADMIN_ROLE:
             raise PermissionError('Solo el administrador puede realizar esta operación.')
+
+    @staticmethod
+    def _require_cashier(role):
+        if role not in CashControlRepository.CASHIER_ROLES:
+            raise PermissionError('La cuenta actual no puede abrir una caja.')
 
     def ensure_default_register(self):
         register = self.__session.scalar(
@@ -53,7 +59,7 @@ class CashControlRepository:
         return register
 
     def open_day(self, opening: CashOpening, authorized_role: str) -> CashOpening:
-        self._require_administrator(authorized_role)
+        self._require_cashier(authorized_role)
         if opening.date != mexico_today():
             raise ValueError('La apertura solo puede registrarse para el día actual.')
         register = self._resolve_register(opening.register_id)

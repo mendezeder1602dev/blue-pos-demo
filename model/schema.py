@@ -11,7 +11,9 @@ from model.timezone import mexico_now
 
 
 DEMO_CLEANUP_MIGRATION = 'clean_demo_2026_08_25_release_v2'
-CURRENT_SCHEMA_MIGRATION = '2026_09_10_multicaja_local_v1'
+MULTICASH_SCHEMA_MIGRATION = '2026_09_10_multicaja_local_v1'
+CUSTOMER_CREDIT_SCHEMA_MIGRATION = '2026_09_16_customer_credit_profiles_v1'
+CURRENT_SCHEMA_MIGRATION = '2026_09_16_customer_contact_validation_v1'
 
 
 def _record_schema_migration(connection, migration_key):
@@ -181,6 +183,8 @@ def create_database(database_url=DB_URL):
             'image_path': "VARCHAR(500) DEFAULT ''", 'barcode': "VARCHAR(100) DEFAULT ''",
             'is_temporary': 'BOOLEAN DEFAULT 0', 'category': "VARCHAR(80) DEFAULT 'General'",
             'supplier': "VARCHAR(120) DEFAULT ''", 'minimum_stock': 'INTEGER DEFAULT 5',
+            'unit_of_measure': "VARCHAR(40) DEFAULT 'Unidad'",
+            'maximum_stock': 'INTEGER DEFAULT 0',
             'wholesale_min_quantity': 'INTEGER DEFAULT 0',
             'wholesale_price': "TEXT DEFAULT '0.00'",
             'is_active': 'BOOLEAN DEFAULT 1',
@@ -203,7 +207,9 @@ def create_database(database_url=DB_URL):
             'postal_code': "VARCHAR(12) DEFAULT ''",
             'tax_regime': "VARCHAR(160) DEFAULT ''",
             'receipt_header': "VARCHAR(300) DEFAULT ''",
+            'ticket_prefix': "VARCHAR(12) DEFAULT 'V'",
             'receipt_footer': "VARCHAR(500) DEFAULT 'Gracias por su compra.'",
+            'enabled_payment_methods': "TEXT DEFAULT ''",
             'return_policy': "VARCHAR(500) DEFAULT ''",
             'brand_color': "VARCHAR(7) DEFAULT '#123B6D'",
             'app_background_color': "VARCHAR(7) DEFAULT '#F1F3F6'",
@@ -255,7 +261,16 @@ def create_database(database_url=DB_URL):
         add_columns(connection, 'customers', {
             'loyalty_points': 'INTEGER DEFAULT 0',
             'lifetime_spend': "TEXT DEFAULT '0.00'",
+            'address': "VARCHAR(300) DEFAULT ''",
+            'phone_country': "VARCHAR(2) NOT NULL DEFAULT 'MX'",
+            'postal_code': "VARCHAR(12) DEFAULT ''",
+            'updated_at': 'DATETIME',
         })
+        connection.execute(text(
+            'UPDATE customers SET updated_at = created_at WHERE updated_at IS NULL'))
+        connection.execute(text(
+            "UPDATE customers SET phone_country = 'MX' "
+            "WHERE phone_country IS NULL OR phone_country = ''"))
         add_columns(connection, 'cash_movements', {
             'opening_id': 'INTEGER',
             'register_id': 'INTEGER',
@@ -290,6 +305,8 @@ def create_database(database_url=DB_URL):
         add_columns(connection, 'purchase_orders', {
             'expected_date': 'DATE',
         })
+        _record_schema_migration(connection, MULTICASH_SCHEMA_MIGRATION)
+        _record_schema_migration(connection, CUSTOMER_CREDIT_SCHEMA_MIGRATION)
         _record_schema_migration(connection, CURRENT_SCHEMA_MIGRATION)
     # Esta versión pública es una demo de Streamlit Community Cloud. La clave de
     # migración garantiza que la limpieza se ejecute una sola vez por despliegue,

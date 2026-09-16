@@ -10,6 +10,7 @@ from sqlalchemy import update, select, delete, cast, Numeric, asc, desc, Float, 
 from model.entity.models import (CashClose, CashMovement, CashOpening, Customer, Product,
                                  ReturnLossRequest, Sale, StockMovement,
                                  StoreCreditMovement, StoreCreditVoucher)
+from model.customer_contact import normalize_email, normalize_phone, normalize_postal_code
 from sqlalchemy.orm import Session, aliased
 
 from model.repository.exc.product import NonExistentProductException, NoPositivePriceException, NegativeCostException
@@ -161,9 +162,13 @@ class SaleRepository(RepositoryObserver):
                         or applied <= 0 or float(voucher.balance.amount) < applied):
                     raise ValueError('El vale no existe o su saldo ya no es suficiente.')
             if credit_account is not None:
-                self.__validate_registered_credit_customer(credit_account.get('customer', ''))
+                credit_customer = self.__validate_registered_credit_customer(
+                    credit_account.get('customer', ''), credit_account.get('customer_id'))
+                credit_account['customer'] = credit_customer.name
             for sale, quantity in entries:
                 sale.transaction_id = transaction_id
+                if credit_account is not None:
+                    sale.customer = credit_account['customer']
                 inserted_sales.extend(self.__execute_insertion_and_return_sales(sale, quantity))
                 result = self.__session.execute(
                     update(Product).where(
@@ -200,15 +205,36 @@ class SaleRepository(RepositoryObserver):
         self._notify_on_data_changed_listeners()
         return inserted_sales
 
-    def __validate_registered_credit_customer(self, customer_name):
+    def __validate_registered_credit_customer(self, customer_name, customer_id=None):
         """El crédito sólo puede generarse contra un cliente activo del directorio."""
         name = (customer_name or '').strip()
         if not name or name.casefold() in ('público general', 'publico general'):
             raise ValueError('Selecciona un cliente registrado para la venta a crédito.')
-        customer = self.__session.scalar(select(Customer).where(
-            Customer.name.ilike(name), Customer.is_active == True))
+        if customer_id is not None:
+            customer = self.__session.get(Customer, int(customer_id))
+            if customer is not None and customer.name.casefold() != name.casefold():
+                customer = None
+        else:
+            customer = self.__session.scalar(select(Customer).where(
+                Customer.name.ilike(name), Customer.is_active == True))
         if customer is None:
             raise ValueError('Registra el cliente antes de vender a crédito.')
+        if not customer.is_active:
+            raise ValueError('El cliente seleccionado ya no está activo.')
+        phone_country = getattr(customer, 'phone_country', '') or 'MX'
+        try:
+            normalize_phone(customer.phone, phone_country)
+        except ValueError:
+            raise ValueError('Actualiza el teléfono del cliente antes de vender a crédito.')
+        try:
+            normalize_email(customer.email or '')
+            normalize_postal_code(getattr(customer, 'postal_code', '') or '', phone_country)
+        except ValueError:
+            raise ValueError(
+                'Actualiza el correo o código postal del cliente antes de vender a crédito.')
+        if len((customer.address or '').strip()) < 5:
+            raise ValueError('Actualiza la dirección del cliente antes de vender a crédito.')
+        return customer
 
     def __require_open_cash(self, register_id=None):
         if not self.__enforce_open_cash:
