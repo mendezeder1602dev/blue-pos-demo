@@ -263,6 +263,21 @@ class TestWebAppSmoke(unittest.TestCase):
         self.assertIn('action_columns[index % len(action_columns)]',
                       command_center_source)
 
+    def test_dashboard_indicator_copy_is_bolder_and_numeric_values_align_right(self):
+        app_path = Path(__file__).resolve().parents[1] / 'web' / 'app.py'
+        source = app_path.read_text(encoding='utf-8')
+
+        self.assertIn("value_kind = ('number' if any(", source)
+        self.assertIn("key=f'dashboard-kpi-{value_kind}-{key}'", source)
+        self.assertIn(
+            '[class*="st-key-dashboard-kpi-"] [data-testid="stCaptionContainer"]',
+            source)
+        self.assertIn('font-size:.84rem; font-weight:650;', source)
+        self.assertIn(
+            '[class*="st-key-dashboard-kpi-number-"] [data-testid="stMetricValue"]',
+            source)
+        self.assertIn('text-align:right;', source)
+
     def test_customer_views_tolerate_streamlit_with_a_stale_customer_model(self):
         """A hot reload must not crash while the process still has the old ORM class."""
         app_path = Path(__file__).resolve().parents[1] / 'web' / 'app.py'
