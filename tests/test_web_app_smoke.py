@@ -248,6 +248,21 @@ class TestWebAppSmoke(unittest.TestCase):
 
         self.assertFalse(any(keyword.arg == 'index' for keyword in picker.keywords))
 
+    def test_quick_actions_render_as_a_dashboard_only_mosaic(self):
+        app_path = Path(__file__).resolve().parents[1] / 'web' / 'app.py'
+        source = app_path.read_text(encoding='utf-8')
+        source_tree = ast.parse(source)
+        command_center = next(
+            node for node in ast.walk(source_tree)
+            if isinstance(node, ast.FunctionDef)
+            and node.name == '_render_command_center')
+        command_center_source = ast.get_source_segment(source, command_center)
+
+        self.assertIn("if current_page == 'Tablero':", command_center_source)
+        self.assertIn("st.columns(3, gap='small')", command_center_source)
+        self.assertIn('action_columns[index % len(action_columns)]',
+                      command_center_source)
+
     def test_customer_views_tolerate_streamlit_with_a_stale_customer_model(self):
         """A hot reload must not crash while the process still has the old ORM class."""
         app_path = Path(__file__).resolve().parents[1] / 'web' / 'app.py'
