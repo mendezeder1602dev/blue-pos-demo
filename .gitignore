@@ -167,3 +167,6 @@ cython_debug/
 # Configuración local del editor y caché accidental de PowerShell
 .vscode/
 Microsoft/
+
+# Copia local de herramientas ECC; no forma parte de la aplicación desplegable
+/ECC/

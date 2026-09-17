@@ -2,8 +2,7 @@
 
 **Puntos ECCOS** es un sistema web comercial de punto de venta para pequeños y
 medianos negocios. Fue creado y desarrollado en Tabasco, México, por
-**Grupo ECCOS**, con apoyo de tecnologías emergentes como Codex. Centraliza
-ventas, inventario, caja, gastos,
+**Grupo ECCOS**. Centraliza ventas, inventario, caja, gastos,
 clientes, abastecimiento, reportes, estadísticas y catálogo comercial desde el
 navegador.
 
@@ -85,10 +84,6 @@ Las instrucciones de Streamlit Community Cloud están en
 ## Autoría y contacto
 
 Creado y desarrollado en Tabasco, México, por **Grupo ECCOS**.
-
-Desarrollo asistido con tecnologías emergentes como **Codex**. Esta mención no
-implica patrocinio, asociación ni propiedad del producto por parte del proveedor
-de dicha tecnología.
 
 Contacto: [mendezeder@gmail.com](mailto:mendezeder@gmail.com)
 
