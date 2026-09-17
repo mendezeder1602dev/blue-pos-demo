@@ -183,7 +183,10 @@ class HeldSale(Base):
     notes = Column(String(length=300), nullable=True, default='')
     created_by = Column(String(length=120), nullable=False, default='Vendedor')
     created_at = Column(DateTime, nullable=False, default=mexico_now)
+    register_id = Column(Integer, ForeignKey('cash_registers.id'), nullable=True, index=True)
+    register_name = Column(String(length=80), nullable=True, default='Caja principal')
     items = relationship('HeldSaleItem', backref='held_sale', cascade='all,delete-orphan')
+    register = relationship('CashRegister')
 
 
 class HeldSaleItem(Base):

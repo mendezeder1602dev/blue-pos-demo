@@ -6,6 +6,7 @@ import os
 import tempfile
 from datetime import datetime, timedelta
 from sqlalchemy.engine import make_url
+from model.authorization import require_role
 
 
 def backup_database(database_path: str, backup_path: str):
@@ -25,6 +26,7 @@ def restore_database(database_path: str, backup_path: str):
 
 def backup_database_bytes(database_url: str) -> bytes:
     """Crea una copia consistente y descargable de una base SQLite activa."""
+    require_role('superuser')
     url = make_url(database_url)
     if url.get_backend_name() != 'sqlite' or not url.database:
         raise ValueError('La descarga directa sólo está disponible para SQLite.')
@@ -64,6 +66,7 @@ def scheduled_backup(database_url: str, interval_days: int = 7, keep: int = 12):
 
 def restore_database_bytes(database_url: str, content: bytes):
     """Valida y restaura un SQLite subido; se publica junto con la interfaz web."""
+    require_role('superuser')
     url = make_url(database_url)
     if url.get_backend_name() != 'sqlite' or not url.database:
         raise ValueError('La restauración directa sólo está disponible para SQLite.')

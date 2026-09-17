@@ -3,6 +3,7 @@ import os
 import secrets
 from datetime import datetime, timedelta
 from sqlalchemy import delete, func, select
+from model.authorization import require_role
 from model.entity.models import AuthSession, User
 
 
@@ -77,11 +78,13 @@ class UserRepository:
             statement = statement.where(User.is_active == True)
         return list(self.__session.scalars(statement.order_by(User.display_name, User.username)).all())
     def create_seller(self, display_name, username, password, confirmation):
+        require_role('superuser')
         display_name = (display_name or '').strip()
         if len(display_name) < 2: raise ValueError('El nombre del vendedor debe tener al menos 2 caracteres.')
         if password != confirmation: raise ValueError('Las contraseñas no coinciden.')
         return self.create(username, password, secrets.token_urlsafe(48), 'seller', display_name, 'primary')
     def reset_seller_password(self, seller_id, password, confirmation):
+        require_role('superuser')
         seller = self.__session.get(User, int(seller_id))
         if seller is None or seller.role != 'seller': raise ValueError('El vendedor ya no existe.')
         if password != confirmation: raise ValueError('Las contraseñas no coinciden.')
@@ -89,12 +92,14 @@ class UserRepository:
         seller.password_hash = self._hash(password); seller.credential_version = int(seller.credential_version or 0) + 1
         self.__session.execute(delete(AuthSession).where(AuthSession.user_id == seller.id)); self.__session.commit()
     def set_seller_active(self, seller_id, active):
+        require_role('superuser')
         seller = self.__session.get(User, int(seller_id))
         if seller is None or seller.role != 'seller': raise ValueError('El vendedor ya no existe.')
         seller.is_active = bool(active)
         if not seller.is_active: self.__session.execute(delete(AuthSession).where(AuthSession.user_id == seller.id))
         self.__session.commit()
     def set_seller_commission(self, seller_id, percent):
+        require_role('superuser')
         seller = self.__session.get(User, int(seller_id))
         if seller is None or seller.role != 'seller': raise ValueError('El vendedor ya no existe.')
         value = float(percent)

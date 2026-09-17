@@ -282,6 +282,10 @@ def create_database(database_url=DB_URL):
             'register_id': 'INTEGER',
             'register_name': "VARCHAR(80) DEFAULT 'Caja principal'",
         })
+        add_columns(connection, 'held_sales', {
+            'register_id': 'INTEGER',
+            'register_name': "VARCHAR(80) DEFAULT 'Caja principal'",
+        })
         connection.execute(text(
             "INSERT INTO cash_registers (name, code, location, is_active, created_at) "
             "SELECT 'Caja principal', 'MAIN', 'Mostrador', 1, :created_at "
@@ -299,6 +303,12 @@ def create_database(database_url=DB_URL):
         connection.execute(text(
             "UPDATE sales SET register_id = (SELECT id FROM cash_registers WHERE code = 'MAIN'), "
             "register_name = 'Caja principal' WHERE register_id IS NULL"))
+        connection.execute(text(
+            "UPDATE held_sales SET register_id = (SELECT id FROM cash_registers WHERE code = 'MAIN'), "
+            "register_name = 'Caja principal' WHERE register_id IS NULL"))
+        connection.execute(text(
+            'CREATE INDEX IF NOT EXISTS idx_held_sales_register_created '
+            'ON held_sales(register_id, created_at)'))
         # ``create_all`` crea las tablas nuevas pero no modifica las existentes.
         # Las instalaciones anteriores ya tenían órdenes de compra, sin fecha
         # prevista; conservarlas requiere agregar la columna por migración.

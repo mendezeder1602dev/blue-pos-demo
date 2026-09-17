@@ -193,9 +193,16 @@ class RepositoryFactory:
     @staticmethod
     def get_cash_control_repository(url: str = None):
         RepositoryFactory.__create_session_if_necessary(url)
-        if RepositoryFactory.__cash_control_repository is None:
-            RepositoryFactory.__cash_control_repository = CashControlRepository(RepositoryFactory.__session)
-        return RepositoryFactory.__cash_control_repository
+        repository = RepositoryFactory.__cash_control_repository
+        # Streamlit recarga los módulos sin reiniciar necesariamente esta fábrica.
+        # Descarta instancias creadas con una versión anterior de la clase.
+        if (repository is None
+                or not callable(getattr(repository, 'get_unclosed_opening', None))
+                or not callable(getattr(repository, 'get_unclosed_openings', None))):
+            from model.repository.cash_control import CashControlRepository as CurrentRepository
+            repository = CurrentRepository(RepositoryFactory.__session)
+            RepositoryFactory.__cash_control_repository = repository
+        return repository
 
     @staticmethod
     def get_operations_repository(url: str = None):

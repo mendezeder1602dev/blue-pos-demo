@@ -65,9 +65,11 @@ class CashControlRepository:
         register = self._resolve_register(opening.register_id)
         opening.register_id = register.id
         opening.register_name = register.name
-        if self.get_opening(opening.date, register.id) is not None:
+        pending = self.get_unclosed_opening(register.id)
+        if pending is not None:
             raise ValueError(
-                'Ya existe un turno abierto para esta caja. Ciérralo antes de iniciar otro.')
+                f'La caja mantiene abierto el turno #{pending.id} del {pending.date}. '
+                'Ciérralo antes de iniciar otro.')
         if not opening.opened_by.strip():
             raise ValueError('Indica quién autoriza la apertura.')
         opening.shift_responsible = (opening.shift_responsible or 'Vendedor').strip()
@@ -119,6 +121,26 @@ class CashControlRepository:
             statement = statement.where(CashOpening.register_id == int(register_id))
         return self.__session.scalar(
             statement.order_by(CashOpening.created_at.desc(), CashOpening.id.desc()).limit(1))
+
+    def get_unclosed_opening(self, register_id=None):
+        """Devuelve el turno pendiente más antiguo, incluso si pertenece a otro día."""
+        statement = select(CashOpening).where(
+            ~exists().where(CashClose.opening_id == CashOpening.id))
+        if register_id is not None:
+            statement = statement.where(CashOpening.register_id == int(register_id))
+        return self.__session.scalar(statement.order_by(
+            CashOpening.date.asc(), CashOpening.created_at.asc(), CashOpening.id.asc()
+        ).limit(1))
+
+    def get_unclosed_openings(self, register_id=None):
+        """Lista todos los turnos sin corte para alertas e historial."""
+        statement = select(CashOpening).where(
+            ~exists().where(CashClose.opening_id == CashOpening.id))
+        if register_id is not None:
+            statement = statement.where(CashOpening.register_id == int(register_id))
+        return list(self.__session.scalars(statement.order_by(
+            CashOpening.date.asc(), CashOpening.created_at.asc(), CashOpening.id.asc()
+        )).all())
 
     def get_openings(self, opening_date, register_id=None):
         statement = select(CashOpening).where(CashOpening.date == opening_date)

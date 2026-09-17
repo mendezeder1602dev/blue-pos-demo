@@ -231,11 +231,16 @@ class OperationsRepository:
             raise
         return request
 
-    def hold_sale(self, label, notes, actor, cart, prices):
+    def hold_sale(self, label, notes, actor, cart, prices, register_id=None,
+                  register_name='Caja principal'):
         """Guarda un carrito para continuarlo después sin modificar existencias."""
         if not cart:
             raise ValueError('No hay productos en la venta.')
-        held = HeldSale(label=label.strip() or 'Venta en espera', notes=notes.strip(), created_by=actor)
+        held = HeldSale(
+            label=label.strip() or 'Venta en espera', notes=notes.strip(),
+            created_by=actor, register_id=register_id,
+            register_name=(register_name or 'Caja principal').strip(),
+        )
         for product_id, quantity in cart.items():
             held.items.append(HeldSaleItem(
                 product_id=product_id, quantity=int(quantity),
@@ -246,16 +251,22 @@ class OperationsRepository:
         self.audit('venta_suspendida', actor, 'held_sale', held.id, held.label)
         return held
 
-    def get_held_sales(self):
+    def get_held_sales(self, register_id):
+        """Devuelve únicamente las ventas suspendidas de la caja indicada."""
         return list(self.__session.scalars(
-            select(HeldSale).order_by(HeldSale.created_at.desc())
+            select(HeldSale).where(HeldSale.register_id == register_id)
+            .order_by(HeldSale.created_at.desc())
         ).unique().all())
 
-    def delete_held_sale(self, held_sale_id):
-        held = self.__session.get(HeldSale, held_sale_id)
-        if held is not None:
-            self.__session.delete(held)
-            self.__session.commit()
+    def delete_held_sale(self, held_sale_id, register_id):
+        """Elimina una espera sólo si pertenece a la caja activa."""
+        held = self.__session.scalar(select(HeldSale).where(
+            HeldSale.id == held_sale_id, HeldSale.register_id == register_id))
+        if held is None:
+            return False
+        self.__session.delete(held)
+        self.__session.commit()
+        return True
 
     @staticmethod
     def _validated_customer_data(name, phone, address, email='', tax_id='', notes='',
