@@ -2243,13 +2243,15 @@ def _actor_name():
             or ('Administrador' if _is_administrator() else 'Vendedor'))
 
 
-def _set_cart_quantity(product_id, quantity, unit_price=None, lock_price=False):
+def _set_cart_quantity(product_id, quantity, unit_price=None, lock_price=False,
+                       sync_widget=False):
     quantity = int(quantity)
     st.session_state.pos_cart[product_id] = quantity
-    # El widget ya administra su propio valor durante este render. Escribirlo aquí
-    # después de instanciarlo provoca StreamlitAPIException.
+    # Las rutas que corren antes de construir el control (catálogo, escáner y
+    # ajustes de existencia) deben actualizar también su valor persistido. En el
+    # callback del propio control se deja en False porque el widget ya existe.
     widget_key = f'cart_qty_{product_id}'
-    if widget_key not in st.session_state:
+    if sync_widget or widget_key not in st.session_state:
         st.session_state[widget_key] = quantity
     st.session_state.setdefault('pos_cart_prices', {})
     if unit_price is not None:
@@ -2313,7 +2315,8 @@ def _open_product_in_sales(product_id, unit_price):
     st.session_state.setdefault('pos_cart_prices', {})
     st.session_state.setdefault('pos_cart_locked_prices', {})
     current_quantity = int(st.session_state.pos_cart.get(product_id, 0))
-    _set_cart_quantity(product_id, max(1, current_quantity + 1), unit_price)
+    _set_cart_quantity(product_id, max(1, current_quantity + 1), unit_price,
+                       sync_widget=True)
     _navigate_to_page('Ventas' if _is_administrator() else 'Nueva venta')
 
 
@@ -2496,7 +2499,7 @@ def _render_sales_content(sales_screen):
         else:
             adjusted_quantity = min(st.session_state.pos_cart[product_id], product.quantity)
             if adjusted_quantity != st.session_state.pos_cart[product_id]:
-                _set_cart_quantity(product_id, adjusted_quantity)
+                _set_cart_quantity(product_id, adjusted_quantity, sync_widget=True)
 
     # La clave crea una clase CSS estable (st-key-pos_workspace) para que esta
     # pantalla pueda responder al ancho disponible sin afectar otros módulos.
@@ -2526,7 +2529,8 @@ def _render_sales_content(sales_screen):
                     _set_cart_quantity(
                         exact_barcode.id, current_scanned + 1,
                         st.session_state.pos_cart_prices.get(
-                            exact_barcode.id, float(exact_barcode.price.amount)))
+                            exact_barcode.id, float(exact_barcode.price.amount)),
+                        sync_widget=True)
                 else:
                     st.error('Ya agregaste todas las existencias disponibles.')
         filter_columns = st.columns(2)
@@ -2605,7 +2609,8 @@ def _render_sales_content(sales_screen):
                                     _set_cart_quantity(
                                         product.id, current + 1,
                                         st.session_state.pos_cart_prices.get(
-                                            product.id, float(product.price.amount)))
+                                            product.id, float(product.price.amount)),
+                                        sync_widget=True)
                                 else:
                                     st.toast('Ya agregaste todo el stock disponible.',
                                              icon=':material/warning:')
@@ -4744,7 +4749,7 @@ def _render_quotes():
                                 item for item in quote.items if item.product_id == product_id)
                             _set_cart_quantity(
                                 product_id, current_cart.get(product_id, 0) + required_quantity,
-                                float(quoted_item.unit_price.amount))
+                                float(quoted_item.unit_price.amount), sync_widget=True)
                         RepositoryFactory.get_quote_repository().update_status(quote.id, 'Aceptada')
                         RepositoryFactory.get_operations_repository().audit(
                             'cotizacion_aceptada', _actor_name(), 'quote', quote.id,

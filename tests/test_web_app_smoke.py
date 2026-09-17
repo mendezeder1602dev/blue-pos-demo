@@ -51,6 +51,15 @@ class TestWebAppSmoke(unittest.TestCase):
         self.assertIn('if raw_quantity is None:', source)
         self.assertIn('return', source[source.index('def _sync_cart_quantity'):source.index('def _cart_unit_price')])
 
+    def test_catalog_add_keeps_the_quantity_widget_equal_to_the_cart(self):
+        """Adding after typing a quantity must refresh the already keyed widget."""
+        app_path = Path(__file__).resolve().parents[1] / 'web' / 'app.py'
+        source = app_path.read_text(encoding='utf-8')
+        sales_source = source[source.index('def _render_sales_content'):source.index('def _render_sale_detail_dialog')]
+
+        self.assertIn('sync_widget=False', source)
+        self.assertGreaterEqual(sales_source.count('sync_widget=True'), 3)
+
     def test_checkout_cart_uses_readable_two_column_product_tiles(self):
         """Two-column checkout tiles reserve room for the price and quantity control."""
         app_path = Path(__file__).resolve().parents[1] / 'web' / 'app.py'
