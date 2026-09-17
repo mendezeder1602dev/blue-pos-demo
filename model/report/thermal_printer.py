@@ -10,6 +10,11 @@ ESC = b'\x1b'
 GS = b'\x1d'
 
 
+def direct_printing_available() -> bool:
+    """Indica si este proceso puede acceder a la cola local de Windows."""
+    return hasattr(ctypes, 'WinDLL')
+
+
 def _text(value) -> bytes:
     """Codifica texto para impresoras térmicas genéricas sin romper el trabajo."""
     return str(value or '').encode('cp850', errors='replace')
@@ -127,7 +132,7 @@ def build_escpos_ticket(
 
 def default_printer_name() -> str:
     """Obtiene la impresora predeterminada del usuario actual de Windows."""
-    if not hasattr(ctypes, 'WinDLL'):
+    if not direct_printing_available():
         raise RuntimeError('La impresión directa solamente está disponible en Windows.')
     winspool = ctypes.WinDLL('winspool.drv', use_last_error=True)
     size = wintypes.DWORD()

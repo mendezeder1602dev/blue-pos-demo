@@ -116,7 +116,9 @@ except ImportError:
             f'<p>{escape(subtitle)}</p>{content}</html>'
         ).encode('utf-8')
 from model.report.ticket import generate_thermal_ticket_bytes as _generate_thermal_ticket_bytes
-from model.report.thermal_printer import build_escpos_ticket, print_raw_ticket
+from model.report.thermal_printer import (
+    build_escpos_ticket, direct_printing_available, print_raw_ticket,
+)
 from model.util.monetary_types import CUPMoney
 from model.timezone import mexico_now, mexico_today
 
@@ -3144,9 +3146,14 @@ def _render_recent_sales():
                         'Ancho de papel', (58, 80), default=58, required=True,
                         key=f'recent_ticket_width_{detail["first_sale_id"]}',
                         format_func=lambda value: f'{value} mm')
+                    if not direct_printing_available():
+                        st.caption(
+                            'La impresión directa requiere la instalación local de Windows. '
+                            'Descarga el PDF para imprimir desde este equipo.')
                     if st.button(
                             'Imprimir ticket', icon=':material/print:', width='stretch',
-                            key=f'recent_ticket_print_{detail["first_sale_id"]}'):
+                            key=f'recent_ticket_print_{detail["first_sale_id"]}',
+                            disabled=not direct_printing_available()):
                         try:
                             printer = _print_thermal_ticket(
                                 business, folio, detail['created_at'], thermal_items,

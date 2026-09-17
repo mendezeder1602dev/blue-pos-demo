@@ -6,7 +6,9 @@ from pypdf import PdfReader
 from reportlab.lib.units import mm
 
 from model.report.ticket import generate_thermal_ticket_bytes
-from model.report.thermal_printer import build_escpos_ticket, print_raw_ticket
+from model.report.thermal_printer import (
+    build_escpos_ticket, direct_printing_available, print_raw_ticket,
+)
 
 
 class ThermalTicketTest(unittest.TestCase):
@@ -84,6 +86,12 @@ class ThermalTicketTest(unittest.TestCase):
     def test_direct_print_rejects_a_virtual_default_printer(self, _default):
         with self.assertRaisesRegex(RuntimeError, 'impresora térmica'):
             print_raw_ticket(b'ticket')
+
+    def test_direct_print_availability_matches_the_runtime_platform(self):
+        """Cloud Linux must not expose a Windows-only printer action."""
+        import ctypes
+
+        self.assertEqual(direct_printing_available(), hasattr(ctypes, 'WinDLL'))
 
 
 if __name__ == '__main__':

@@ -60,6 +60,15 @@ class TestWebAppSmoke(unittest.TestCase):
         self.assertIn('sync_widget=False', source)
         self.assertGreaterEqual(sales_source.count('sync_widget=True'), 3)
 
+    def test_cloud_reprint_disables_the_windows_only_direct_printer(self):
+        app_path = Path(__file__).resolve().parents[1] / 'web' / 'app.py'
+        source = app_path.read_text(encoding='utf-8')
+        recent_sales = source[source.index('def _render_recent_sales'):source.index('def _render_inventory_excel_import')]
+
+        self.assertIn('direct_printing_available', source)
+        self.assertIn('disabled=not direct_printing_available()', recent_sales)
+        self.assertIn('Descarga el PDF para imprimir desde este equipo.', recent_sales)
+
     def test_checkout_cart_uses_readable_two_column_product_tiles(self):
         """Two-column checkout tiles reserve room for the price and quantity control."""
         app_path = Path(__file__).resolve().parents[1] / 'web' / 'app.py'
