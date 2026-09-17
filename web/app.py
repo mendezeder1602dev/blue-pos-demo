@@ -2261,7 +2261,13 @@ def _set_cart_quantity(product_id, quantity, unit_price=None, lock_price=False):
 def _sync_cart_quantity(product_id, maximum):
     """Actualiza el carrito en el callback, antes de recalcular sus importes."""
     widget_key = f'cart_qty_{product_id}'
-    quantity = max(1, min(int(st.session_state[widget_key]), int(maximum)))
+    # Un cobro o la recuperación de una venta puede limpiar el carrito antes de
+    # que Streamlit ejecute un callback que ya estaba en cola. En ese caso no hay
+    # nada que sincronizar y acceder por índice produciría un KeyError.
+    raw_quantity = st.session_state.get(widget_key)
+    if raw_quantity is None:
+        return
+    quantity = max(1, min(int(raw_quantity), int(maximum)))
     st.session_state[widget_key] = quantity
     _set_cart_quantity(product_id, quantity)
 

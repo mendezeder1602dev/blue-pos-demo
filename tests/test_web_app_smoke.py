@@ -42,6 +42,15 @@ class TestWebAppSmoke(unittest.TestCase):
         self.assertIn('args=(product_id, product.quantity)', source)
         self.assertNotIn('if int(new_quantity) != current_quantity:', source)
 
+    def test_cart_quantity_callback_tolerates_a_widget_key_cleaned_before_rerun(self):
+        """Checkout cleanup may remove the widget state before its queued callback runs."""
+        app_path = Path(__file__).resolve().parents[1] / 'web' / 'app.py'
+        source = app_path.read_text(encoding='utf-8')
+
+        self.assertIn("raw_quantity = st.session_state.get(widget_key)", source)
+        self.assertIn('if raw_quantity is None:', source)
+        self.assertIn('return', source[source.index('def _sync_cart_quantity'):source.index('def _cart_unit_price')])
+
     def test_checkout_cart_uses_readable_two_column_product_tiles(self):
         """Two-column checkout tiles reserve room for the price and quantity control."""
         app_path = Path(__file__).resolve().parents[1] / 'web' / 'app.py'
