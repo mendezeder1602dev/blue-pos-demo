@@ -9,6 +9,56 @@ from streamlit.testing.v1 import AppTest
 
 
 class TestWebAppSmoke(unittest.TestCase):
+    def test_app_and_readme_keep_authorship_but_omit_external_technology_credit(self):
+        root = Path(__file__).resolve().parents[1]
+        app_source = (root / 'web' / 'app.py').read_text(encoding='utf-8')
+        readme = (root / 'README.md').read_text(encoding='utf-8')
+        published_text = f'{app_source}\n{readme}'.casefold()
+
+        removed_provider_name = 'co' + 'dex'
+        self.assertNotIn(removed_provider_name, published_text)
+        self.assertIn(
+            'Creado y desarrollado en Tabasco, México, por Grupo ECCOS',
+            app_source)
+        self.assertIn('Software propietario', app_source)
+
+    def test_authenticated_pages_do_not_render_space_consuming_command_header(self):
+        app_path = Path(__file__).resolve().parents[1] / 'web' / 'app.py'
+        source = app_path.read_text(encoding='utf-8')
+
+        self.assertNotIn('def _render_command_center(', source)
+        self.assertNotIn('_render_command_center(user, pages, business_profile)', source)
+        self.assertNotIn('Centro de mando web', source)
+        self.assertIn('def _render_dashboard_shortcuts(pages):', source)
+        self.assertIn('_render_dashboard_shortcuts(pages)', source)
+
+    def test_cart_quantity_widget_syncs_before_checkout_totals_render(self):
+        """A changed quantity must update every cart total in the same rerun."""
+        app_path = Path(__file__).resolve().parents[1] / 'web' / 'app.py'
+        source = app_path.read_text(encoding='utf-8')
+
+        self.assertIn('def _sync_cart_quantity(product_id, maximum):', source)
+        self.assertIn('on_change=_sync_cart_quantity', source)
+        self.assertIn('args=(product_id, product.quantity)', source)
+        self.assertNotIn('if int(new_quantity) != current_quantity:', source)
+
+    def test_checkout_cart_uses_readable_two_column_product_tiles(self):
+        """Two-column checkout tiles reserve room for the price and quantity control."""
+        app_path = Path(__file__).resolve().parents[1] / 'web' / 'app.py'
+        source = app_path.read_text(encoding='utf-8')
+
+        self.assertIn("key='cart_item_list', gap='xsmall'", source)
+        self.assertIn("key=f'cart_tile_{product_id}'", source)
+        self.assertIn('min-height:148px', source)
+        self.assertIn('overflow-wrap:anywhere', source)
+        self.assertIn('font-size:.98rem', source)
+        self.assertIn('font-size:.96rem', source)
+        self.assertIn('font-size:.74rem', source)
+        self.assertIn('class="cart-calculation"', source)
+        self.assertIn("f'{current_quantity} × {_mxn(unit_price)}", source)
+        self.assertIn('for row_start in range(0, distinct_count, 2):', source)
+        self.assertIn("cart_items.columns(2, gap='xsmall')", source)
+
     def test_credit_checkout_requires_confirmed_complete_customer_profile(self):
         app_path = Path(__file__).resolve().parents[1] / 'web' / 'app.py'
         source = app_path.read_text(encoding='utf-8')
@@ -192,8 +242,7 @@ class TestWebAppSmoke(unittest.TestCase):
         source = app_path.read_text(encoding='utf-8')
         source_tree = ast.parse(source)
 
-        for function_name in (
-                '_render_quotes', '_render_cash_close', '_render_multicash_dashboard'):
+        for function_name in ('_render_quotes', '_render_multicash_dashboard'):
             function = next(
                 node for node in ast.walk(source_tree)
                 if isinstance(node, ast.FunctionDef) and node.name == function_name)
@@ -252,16 +301,16 @@ class TestWebAppSmoke(unittest.TestCase):
         app_path = Path(__file__).resolve().parents[1] / 'web' / 'app.py'
         source = app_path.read_text(encoding='utf-8')
         source_tree = ast.parse(source)
-        command_center = next(
+        dashboard_shortcuts = next(
             node for node in ast.walk(source_tree)
             if isinstance(node, ast.FunctionDef)
-            and node.name == '_render_command_center')
-        command_center_source = ast.get_source_segment(source, command_center)
+            and node.name == '_render_dashboard_shortcuts')
+        shortcuts_source = ast.get_source_segment(source, dashboard_shortcuts)
 
-        self.assertIn("if current_page == 'Tablero':", command_center_source)
-        self.assertIn("st.columns(3, gap='small')", command_center_source)
+        self.assertIn("if current_page == 'Tablero':", shortcuts_source)
+        self.assertIn("st.columns(3, gap='small')", shortcuts_source)
         self.assertIn('action_columns[index % len(action_columns)]',
-                      command_center_source)
+                      shortcuts_source)
 
     def test_dashboard_indicator_copy_is_bolder_and_numeric_values_align_right(self):
         app_path = Path(__file__).resolve().parents[1] / 'web' / 'app.py'

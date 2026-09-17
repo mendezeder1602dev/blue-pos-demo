@@ -186,3 +186,17 @@ class TestBusinessExtensions(unittest.TestCase):
             with closing(sqlite3.connect(destination)) as connection:
                 value = connection.execute('SELECT value FROM marker').fetchone()[0]
             self.assertEqual(value, 'copia')
+
+    def test_seller_cannot_download_or_restore_the_complete_database(self):
+        with tempfile.TemporaryDirectory() as folder:
+            database = Path(folder) / 'protected.db'
+            with closing(sqlite3.connect(database)) as connection:
+                connection.execute('CREATE TABLE marker (value TEXT)')
+                connection.commit()
+            url = f'sqlite:///{database}'
+
+            with authorization_context('seller'):
+                with self.assertRaises(PermissionError):
+                    backup_database_bytes(url)
+                with self.assertRaises(PermissionError):
+                    restore_database_bytes(url, database.read_bytes())

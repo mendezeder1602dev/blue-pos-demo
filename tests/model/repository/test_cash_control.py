@@ -8,7 +8,7 @@ from sqlalchemy.orm import Session
 from model.entity.models import Base, CashClose, CashMovement, CashOpening
 from model.repository.cash_close import CashCloseRepository
 from model.repository.cash_control import CashControlRepository
-from model.timezone import mexico_today
+from model.timezone import mexico_now, mexico_today
 from model.util.monetary_types import CUPMoney
 
 
@@ -127,6 +127,42 @@ class TestCashControlWorkflow(unittest.TestCase):
                 cash_limit=CUPMoney('3000.00'), opened_by='Administrador',
                 register_id=main.id,
             ), 'superuser')
+
+    def test_previous_unclosed_shift_blocks_a_new_day_for_the_same_register(self):
+        control = CashControlRepository(self.session)
+        register = control.ensure_default_register()
+        previous = CashOpening(
+            date=mexico_today() - timedelta(days=1),
+            opening_amount=CUPMoney('500.00'), cash_limit=CUPMoney('3000.00'),
+            opened_by='Administrador', shift_responsible='Turno anterior',
+            register_id=register.id, register_name=register.name,
+            created_at=mexico_now() - timedelta(hours=12),
+        )
+        self.session.add(previous)
+        self.session.commit()
+
+        self.assertEqual(control.get_unclosed_opening(register.id).id, previous.id)
+        with self.assertRaisesRegex(ValueError, 'turno #'):
+            control.open_day(CashOpening(
+                date=mexico_today(), opening_amount=CUPMoney('500.00'),
+                cash_limit=CUPMoney('3000.00'), opened_by='Administrador',
+                register_id=register.id,
+            ), 'superuser')
+
+    def test_unclosed_openings_include_only_shifts_without_a_close(self):
+        control = CashControlRepository(self.session)
+        closes = CashCloseRepository(self.session)
+        today = mexico_today()
+        opening = control.open_day(CashOpening(
+            date=today, opening_amount=CUPMoney('500.00'),
+            cash_limit=CUPMoney('3000.00'), opened_by='Administrador',
+        ), 'superuser')
+
+        self.assertEqual([item.id for item in control.get_unclosed_openings()], [opening.id])
+        closes.insert(CashClose(
+            date=today, opening_id=opening.id, cashier='Administrador',
+            counted_cash=CUPMoney('500.00')))
+        self.assertEqual(control.get_unclosed_openings(), [])
 
 
 if __name__ == '__main__':

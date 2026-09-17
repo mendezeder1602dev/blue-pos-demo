@@ -58,12 +58,25 @@ class TestOperationsRepository(unittest.TestCase):
     def test_hold_sale_preserves_quantity_and_negotiated_price(self):
         held = self.repository.hold_sale(
             'Cliente en espera', '', 'Vendedor', {self.product.id: 2},
-            {self.product.id: 17.50})
+            {self.product.id: 17.50}, register_id=10,
+            register_name='Caja norte')
 
         self.assertEqual(held.items[0].quantity, 2)
         self.assertEqual(float(held.items[0].unit_price.amount), 17.50)
-        self.repository.delete_held_sale(held.id)
-        self.assertEqual(self.repository.get_held_sales(), [])
+        self.assertEqual(held.register_id, 10)
+        self.assertEqual(self.repository.get_held_sales(10), [held])
+        self.assertEqual(self.repository.delete_held_sale(held.id, 10), True)
+        self.assertEqual(self.repository.get_held_sales(10), [])
+
+    def test_held_sales_cannot_be_viewed_or_deleted_from_another_cash_register(self):
+        held = self.repository.hold_sale(
+            'Pedido caja norte', '', 'Vendedor norte', {self.product.id: 1},
+            {self.product.id: 20.00}, register_id=10,
+            register_name='Caja norte')
+
+        self.assertEqual(self.repository.get_held_sales(11), [])
+        self.assertFalse(self.repository.delete_held_sale(held.id, 11))
+        self.assertEqual(self.repository.get_held_sales(10), [held])
 
     def test_negative_result_is_rejected(self):
         with self.assertRaises(ValueError):

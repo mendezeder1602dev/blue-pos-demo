@@ -111,6 +111,36 @@ class CashShiftSchemaMigrationTest(unittest.TestCase):
             self.assertIn('postal_code', columns)
             self.assertEqual(country, 'MX')
 
+    def test_assigns_legacy_held_sales_to_the_main_cash_register(self):
+        with tempfile.TemporaryDirectory() as folder:
+            database_path = Path(folder) / 'legacy-held-sales.db'
+            url = f"sqlite:///{database_path.as_posix()}"
+            engine = create_engine(url, future=True)
+            with engine.begin() as connection:
+                connection.execute(text(
+                    'CREATE TABLE held_sales ('
+                    'id INTEGER PRIMARY KEY, label VARCHAR(120) NOT NULL, '
+                    "notes VARCHAR(300) DEFAULT '', created_by VARCHAR(120) NOT NULL, "
+                    'created_at DATETIME NOT NULL)'))
+                connection.execute(text(
+                    "INSERT INTO held_sales (label, notes, created_by, created_at) "
+                    "VALUES ('Pedido heredado', '', 'Vendedor', CURRENT_TIMESTAMP)"))
+            engine.dispose()
+
+            create_database(url)
+
+            migrated_engine = create_engine(url, future=True)
+            columns = {
+                column['name'] for column in inspect(migrated_engine).get_columns('held_sales')
+            }
+            with migrated_engine.connect() as connection:
+                register_name = connection.execute(text(
+                    'SELECT register_name FROM held_sales WHERE id = 1'
+                )).scalar_one()
+            migrated_engine.dispose()
+            self.assertIn('register_id', columns)
+            self.assertEqual(register_name, 'Caja principal')
+
 
 if __name__ == '__main__':
     unittest.main()

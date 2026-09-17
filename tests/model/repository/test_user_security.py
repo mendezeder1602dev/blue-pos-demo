@@ -3,6 +3,7 @@ import unittest
 from sqlalchemy import create_engine
 from sqlalchemy.orm import Session
 
+from model.authorization import authorization_context
 from model.entity.models import Base
 from model.repository.user import UserRepository
 
@@ -59,6 +60,18 @@ class UserSecurityTest(unittest.TestCase):
         self.assertIsNone(self.repository.authenticate_session(token))
         self.assertIsNotNone(
             self.repository.authenticate('admin_seguridad', 'Otra-Clave-2026'))
+
+    def test_seller_cannot_manage_other_seller_accounts(self):
+        seller = self.repository.create_seller(
+            'Vendedor protegido', 'vendedor_protegido',
+            'Clave-Vendedor-2026', 'Clave-Vendedor-2026')
+
+        with authorization_context('seller'):
+            with self.assertRaises(PermissionError):
+                self.repository.set_seller_active(seller.id, False)
+            with self.assertRaises(PermissionError):
+                self.repository.reset_seller_password(
+                    seller.id, 'Otra-Clave-2026', 'Otra-Clave-2026')
 
 
 if __name__ == '__main__':
