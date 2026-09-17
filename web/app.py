@@ -116,9 +116,16 @@ except ImportError:
             f'<p>{escape(subtitle)}</p>{content}</html>'
         ).encode('utf-8')
 from model.report.ticket import generate_thermal_ticket_bytes as _generate_thermal_ticket_bytes
-from model.report.thermal_printer import (
-    build_escpos_ticket, direct_printing_available, print_raw_ticket,
-)
+from model.report.thermal_printer import build_escpos_ticket, print_raw_ticket
+
+# Durante un redeploy, Community Cloud puede conservar un módulo auxiliar de la
+# revisión anterior mientras ya recarga app.py. La interfaz sigue arrancando y
+# aplica la misma regla de plataforma hasta que termine la actualización.
+try:
+    from model.report.thermal_printer import direct_printing_available
+except ImportError:
+    def direct_printing_available():
+        return sys.platform == 'win32'
 from model.util.monetary_types import CUPMoney
 from model.timezone import mexico_now, mexico_today
 

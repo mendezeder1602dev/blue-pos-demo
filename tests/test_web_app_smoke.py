@@ -66,6 +66,8 @@ class TestWebAppSmoke(unittest.TestCase):
         recent_sales = source[source.index('def _render_recent_sales'):source.index('def _render_inventory_excel_import')]
 
         self.assertIn('direct_printing_available', source)
+        self.assertIn(
+            'except ImportError:\n    def direct_printing_available():', source)
         self.assertIn('disabled=not direct_printing_available()', recent_sales)
         self.assertIn('Descarga el PDF para imprimir desde este equipo.', recent_sales)
 
